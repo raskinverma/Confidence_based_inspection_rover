@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<robot name="rover" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Arguments -->
+  <xacro:arg name="use_sim_time" default="false"/>
+  <xacro:arg name="use_gazebo" default="true"/>
+
+  <!-- Include modular xacro files -->
+  <xacro:include filename="$(find rover_description)/urdf/inertial_macros.xacro"/>
+  <xacro:include filename="$(find rover_description)/urdf/materials.xacro"/>
+  <xacro:include filename="$(find rover_description)/urdf/base.xacro"/>
+  <xacro:include filename="$(find rover_description)/urdf/sensors.xacro"/>
+
+  <!-- Gazebo plugins & ros2_control (only loaded if use_gazebo is true) -->
+  <xacro:if value="$(arg use_gazebo)">
+    <xacro:include filename="$(find rover_description)/urdf/gazebo_plugins.xacro"/>
+  </xacro:if>
+
+</robot>

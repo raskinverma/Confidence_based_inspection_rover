@@ -1,0 +1,27 @@
+build/
+install/
+log/
+__pycache__/
+*.pyc
+*.pyo
+.vscode/
+.idea/
+*.swp
+*.bag
+*.db3
+*.mcap
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.webm
+.DS_Store
+
+# Generated inspection output - kept on disk, not tracked
+inspection_defects.csv
+results/
+*.pgm.bak
+
+# colcon artifacts
+.cmake/
+

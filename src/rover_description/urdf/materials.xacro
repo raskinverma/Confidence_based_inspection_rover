@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<!-- Material colour definitions for the inspection rover. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <material name="chassis_grey">
+    <color rgba="0.3 0.3 0.3 1.0"/>
+  </material>
+
+  <material name="wheel_black">
+    <color rgba="0.1 0.1 0.1 1.0"/>
+  </material>
+
+  <material name="caster_silver">
+    <color rgba="0.7 0.7 0.7 1.0"/>
+  </material>
+
+  <material name="lidar_blue">
+    <color rgba="0.0 0.2 0.8 1.0"/>
+  </material>
+
+  <material name="camera_dark">
+    <color rgba="0.15 0.15 0.15 1.0"/>
+  </material>
+
+  <material name="imu_green">
+    <color rgba="0.1 0.6 0.1 1.0"/>
+  </material>
+
+</robot>
