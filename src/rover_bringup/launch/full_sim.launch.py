@@ -19,6 +19,9 @@ def generate_launch_description():
     run_mission = LaunchConfiguration('run_mission')
     map_yaml_file = LaunchConfiguration('map')
     output_dir = LaunchConfiguration('output_dir')
+    world = LaunchConfiguration('world')
+    headless = LaunchConfiguration('headless')
+    use_rviz = LaunchConfiguration('use_rviz')
 
     declare_use_sim_time = DeclareLaunchArgument(
         'use_sim_time',
@@ -57,6 +60,25 @@ def generate_launch_description():
         description='Directory for defect CSV output (relative to cwd or absolute)'
     )
 
+    default_world = os.path.join(pkg_rover_gazebo, 'worlds', 'inspection_facility.sdf')
+    declare_world = DeclareLaunchArgument(
+        'world',
+        default_value=default_world,
+        description='Full path to Gazebo SDF world file'
+    )
+
+    declare_headless = DeclareLaunchArgument(
+        'headless',
+        default_value='false',
+        description='Run Gazebo in headless mode if true'
+    )
+
+    declare_use_rviz = DeclareLaunchArgument(
+        'use_rviz',
+        default_value='true',
+        description='Launch RViz2 if true'
+    )
+
     # 1. Gazebo Simulation + Rover + Bridge + Relay (RViz disabled here; launched by nav/slam)
     sim_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -64,7 +86,9 @@ def generate_launch_description():
         ),
         launch_arguments={
             'use_sim_time': use_sim_time,
-            'use_rviz': 'false'
+            'use_rviz': 'false',
+            'world': world,
+            'headless': headless
         }.items()
     )
 
@@ -99,7 +123,7 @@ def generate_launch_description():
         launch_arguments={
             'use_sim_time': use_sim_time,
             'map': map_yaml_file,
-            'use_rviz': 'true'
+            'use_rviz': use_rviz
         }.items(),
         condition=LaunchConfigurationEquals('mode', 'nav')
     )
@@ -121,6 +145,9 @@ def generate_launch_description():
         declare_run_mission,
         declare_map,
         declare_output_dir,
+        declare_world,
+        declare_headless,
+        declare_use_rviz,
         sim_launch,
         perception_launch,
         slam_launch,
