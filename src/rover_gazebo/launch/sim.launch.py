@@ -3,7 +3,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable, AppendEnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, Command
+from launch.substitutions import LaunchConfiguration, Command, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch.conditions import IfCondition
@@ -82,12 +82,15 @@ def generate_launch_description():
     )
 
     # Gazebo Sim Launch
+    gz_args = PythonExpression([
+        "'-s -r --headless-rendering ' + '", world, "' if '", headless, "' == 'true' else '-r ' + '", world, "'"
+    ])
     gz_sim_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
         ),
         launch_arguments={
-            'gz_args': ['-r ', world]
+            'gz_args': gz_args
         }.items()
     )
 
