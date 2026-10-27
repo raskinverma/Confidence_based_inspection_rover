@@ -1,0 +1,110 @@
+# Candidate slots for defects and distractors in the inspection facility
+# Each slot represents a valid, reachable, and camera-visible location.
+# Fields:
+#   id: unique slot identifier (int or str)
+#   name: human-readable descriptor
+#   surface: mounting surface ("wall_...", "floor", etc.)
+#   position: [x, y, z] in world/map coordinates (meters)
+#   orientation: [roll, pitch, yaw] in radians
+#   type_affinity: list of object types suitable for this slot ("rust", "leak", "aruco", "distractor")
+
+slots:
+  # Existing baseline marker locations
+  - id: 1
+    name: "room_a_sub_wall_south"
+    surface: "wall_room_a_sub"
+    position: [-2.5, 0.38, 0.25]
+    orientation: [0.0, 0.0, 0.0]
+    type_affinity: ["rust", "leak", "aruco", "distractor"]
+
+  - id: 2
+    name: "room_b_east_wall_north"
+    surface: "wall_outer_east"
+    position: [4.88, 1.5, 0.25]
+    orientation: [0.0, 0.0, 3.14159]
+    type_affinity: ["rust", "leak", "aruco", "distractor"]
+
+  - id: 3
+    name: "room_b_north_wall_pipes"
+    surface: "wall_outer_north"
+    position: [2.3, 3.88, 0.25]
+    orientation: [0.0, 0.0, -1.5708]
+    type_affinity: ["leak", "rust", "distractor"]
+
+  - id: 4
+    name: "corridor_south_wall_center"
+    surface: "wall_outer_south"
+    position: [2.5, -3.88, 0.25]
+    orientation: [0.0, 0.0, 1.5708]
+    type_affinity: ["leak", "rust", "aruco", "distractor"]
+
+  - id: 5
+    name: "room_b_inner_wall_entry"
+    surface: "wall_inner_north"
+    position: [0.12, 1.0, 0.30]
+    orientation: [0.0, 0.0, 0.0]
+    type_affinity: ["aruco", "rust", "distractor"]
+
+  - id: 6
+    name: "room_a_west_wall_south"
+    surface: "wall_outer_west"
+    position: [-4.88, -2.0, 0.30]
+    orientation: [0.0, 0.0, 0.0]
+    type_affinity: ["aruco", "rust", "distractor"]
+
+  # Additional candidate slots (reachable and visible)
+  - id: 7
+    name: "room_a_west_wall_north"
+    surface: "wall_outer_west"
+    position: [-4.88, 2.0, 0.25]
+    orientation: [0.0, 0.0, 0.0]
+    type_affinity: ["rust", "leak", "aruco", "distractor"]
+
+  - id: 8
+    name: "room_a_north_wall_center"
+    surface: "wall_outer_north"
+    position: [-1.5, 3.88, 0.25]
+    orientation: [0.0, 0.0, -1.5708]
+    type_affinity: ["leak", "rust", "distractor"]
+
+  - id: 9
+    name: "room_a_south_wall_west"
+    surface: "wall_outer_south"
+    position: [-2.5, -3.88, 0.25]
+    orientation: [0.0, 0.0, 1.5708]
+    type_affinity: ["leak", "rust", "distractor"]
+
+  - id: 10
+    name: "room_a_inner_wall_south_face"
+    surface: "wall_inner_south"
+    position: [-0.12, -1.5, 0.30]
+    orientation: [0.0, 0.0, 3.14159]
+    type_affinity: ["aruco", "rust", "distractor"]
+
+  - id: 11
+    name: "room_b_east_wall_south"
+    surface: "wall_outer_east"
+    position: [4.88, -1.0, 0.25]
+    orientation: [0.0, 0.0, 3.14159]
+    type_affinity: ["rust", "leak", "distractor"]
+
+  - id: 12
+    name: "corridor_divider_south_face"
+    surface: "wall_corridor_div"
+    position: [2.5, -2.12, 0.25]
+    orientation: [0.0, 0.0, -1.5708]
+    type_affinity: ["rust", "leak", "aruco", "distractor"]
+
+  - id: 13
+    name: "room_b_floor_puddle"
+    surface: "floor"
+    position: [2.0, 1.5, 0.02]
+    orientation: [0.0, 0.0, 0.0]
+    type_affinity: ["leak", "distractor"]
+
+  - id: 14
+    name: "room_a_floor_puddle"
+    surface: "floor"
+    position: [-3.0, -1.5, 0.02]
+    orientation: [0.0, 0.0, 0.0]
+    type_affinity: ["leak", "distractor"]

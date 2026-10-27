@@ -7,12 +7,17 @@ Detects:
   3. ArUco markers (asset tags) via cv2.aruco
 Publishes:
   /defect_detections: custom rover_interfaces/msg/Defect
+  /camera/detections_debug: sensor_msgs/Image with bounding boxes
+
+Thresholds are declared as ROS parameters (loaded from detector_params.yaml
+or falling back to defaults).
 """
 
 import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
 from rover_interfaces.msg import Defect
@@ -25,17 +30,28 @@ class DefectDetector(Node):
         self.bridge = CvBridge()
         self.camera_info = None
 
+        # Declare ROS parameters for thresholds with baseline defaults
+        self.declare_parameter('min_contour_area', 500)
+        self.declare_parameter('rust.lower_hsv_1', [0, 100, 70])
+        self.declare_parameter('rust.upper_hsv_1', [10, 255, 255])
+        self.declare_parameter('rust.lower_hsv_2', [170, 100, 70])
+        self.declare_parameter('rust.upper_hsv_2', [180, 255, 255])
+        self.declare_parameter('leak.lower_hsv', [20, 100, 100])
+        self.declare_parameter('leak.upper_hsv', [35, 255, 255])
+        self.declare_parameter('aruco.dictionary', 'DICT_4X4_50')
+        self.declare_parameter('aruco.default_confidence', 0.95)
+
         # ArUco detector setup (OpenCV 4.x compatible)
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        dict_name = self.get_parameter('aruco.dictionary').value
+        aruco_dict_id = getattr(cv2.aruco, dict_name, cv2.aruco.DICT_4X4_50)
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_id)
+
         if hasattr(cv2.aruco, 'ArucoDetector'):
             self.aruco_params = cv2.aruco.DetectorParameters()
             self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
         else:
             self.aruco_params = cv2.aruco.DetectorParameters_create()
             self.aruco_detector = None
-
-        # Min contour area to avoid noise
-        self.min_contour_area = 500
 
         # Subscriptions
         self.sub_cam_info = self.create_subscription(
@@ -65,7 +81,7 @@ class DefectDetector(Node):
             10
         )
 
-        self.get_logger().info('DefectDetector initialized (HSV Red/Yellow + ArUco 4x4)')
+        self.get_logger().info('DefectDetector initialized (HSV Red/Yellow + ArUco with ROS params)')
 
     def camera_info_callback(self, msg: CameraInfo):
         self.camera_info = msg
@@ -81,10 +97,10 @@ class DefectDetector(Node):
         hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
 
         # 1. Detect Red (Rust) - Two ranges across the hue boundary
-        lower_red1 = np.array([0, 100, 70])
-        upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([170, 100, 70])
-        upper_red2 = np.array([180, 255, 255])
+        lower_red1 = np.array(self.get_parameter('rust.lower_hsv_1').value)
+        upper_red1 = np.array(self.get_parameter('rust.upper_hsv_1').value)
+        lower_red2 = np.array(self.get_parameter('rust.lower_hsv_2').value)
+        upper_red2 = np.array(self.get_parameter('rust.upper_hsv_2').value)
 
         mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
         mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
@@ -92,8 +108,8 @@ class DefectDetector(Node):
         self.process_color_mask(mask_red, "rust", (0, 0, 255), msg.header, debug_image)
 
         # 2. Detect Yellow (Leak)
-        lower_yellow = np.array([20, 100, 100])
-        upper_yellow = np.array([35, 255, 255])
+        lower_yellow = np.array(self.get_parameter('leak.lower_hsv').value)
+        upper_yellow = np.array(self.get_parameter('leak.upper_hsv').value)
         mask_yellow = cv2.inRange(hsv, lower_yellow, upper_yellow)
         self.process_color_mask(mask_yellow, "leak", (0, 255, 255), msg.header, debug_image)
 
@@ -105,6 +121,7 @@ class DefectDetector(Node):
             corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
 
         if ids is not None:
+            aruco_conf = float(self.get_parameter('aruco.default_confidence').value)
             for i in range(len(ids)):
                 c = corners[i][0]
                 u = int(np.mean(c[:, 0]))
@@ -117,7 +134,7 @@ class DefectDetector(Node):
                 cv2.putText(debug_image, defect_type, (u - 20, v - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-                self.publish_defect(defect_type, 0.95, u, v, msg.header)
+                self.publish_defect(defect_type, aruco_conf, u, v, msg.header)
 
         # Publish debug image
         debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
@@ -130,10 +147,11 @@ class DefectDetector(Node):
         cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
 
+        min_area = int(self.get_parameter('min_contour_area').value)
         contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area >= self.min_contour_area:
+            if area >= min_area:
                 x, y, w, h = cv2.boundingRect(cnt)
                 u = int(x + w / 2)
                 v = int(y + h / 2)
@@ -154,9 +172,6 @@ class DefectDetector(Node):
         defect.pixel_u = int(u)
         defect.pixel_v = int(v)
         self.pub_defect.publish(defect)
-
-
-from rclpy.executors import ExternalShutdownException
 
 
 def main(args=None):

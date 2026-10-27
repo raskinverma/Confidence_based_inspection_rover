@@ -1,0 +1,95 @@
+metadata:
+  world_name: inspection_facility_seed1
+  seed: 1
+  num_defects: 6
+  num_distractors: 0
+  camera_noise: 0.007
+  sdf_file: inspection_facility_seed1.sdf
+defects:
+- id: 1
+  name: defect_leak_1
+  type: leak
+  is_defect: true
+  slot_id: 14
+  surface: floor
+  position:
+  - -3.0
+  - -1.5
+  - 0.02
+  orientation:
+  - 0.0
+  - 0.0
+  - 0.0
+- id: 2
+  name: defect_rust_1
+  type: rust
+  is_defect: true
+  slot_id: 11
+  surface: wall_outer_east
+  position:
+  - 4.88
+  - -1.0
+  - 0.25
+  orientation:
+  - 0.0
+  - 0.0
+  - 3.142
+- id: 3
+  name: defect_leak_2
+  type: leak
+  is_defect: true
+  slot_id: 1
+  surface: wall_room_a_sub
+  position:
+  - -2.5
+  - 0.38
+  - 0.25
+  orientation:
+  - 0.0
+  - 0.0
+  - 0.0
+- id: 4
+  name: defect_leak_3
+  type: leak
+  is_defect: true
+  slot_id: 13
+  surface: floor
+  position:
+  - 2.0
+  - 1.5
+  - 0.02
+  orientation:
+  - 0.0
+  - 0.0
+  - 0.0
+- id: 5
+  name: defect_aruco_1
+  type: aruco
+  is_defect: true
+  slot_id: 7
+  surface: wall_outer_west
+  position:
+  - -4.88
+  - 2.0
+  - 0.25
+  orientation:
+  - 0.0
+  - 0.0
+  - 0.0
+  aruco_id: 1
+- id: 6
+  name: defect_aruco_2
+  type: aruco
+  is_defect: true
+  slot_id: 6
+  surface: wall_outer_west
+  position:
+  - -4.88
+  - -2.0
+  - 0.3
+  orientation:
+  - 0.0
+  - 0.0
+  - 0.0
+  aruco_id: 2
+distractors: []

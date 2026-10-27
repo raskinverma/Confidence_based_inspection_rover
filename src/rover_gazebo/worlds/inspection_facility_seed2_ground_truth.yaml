@@ -1,0 +1,123 @@
+metadata:
+  world_name: inspection_facility_seed2
+  seed: 2
+  num_defects: 6
+  num_distractors: 2
+  camera_noise: 0.007
+  sdf_file: inspection_facility_seed2.sdf
+defects:
+- id: 1
+  name: defect_rust_1
+  type: rust
+  is_defect: true
+  slot_id: 10
+  surface: wall_inner_south
+  position:
+  - -0.12
+  - -1.5
+  - 0.3
+  orientation:
+  - 0.0
+  - 0.0
+  - 3.142
+- id: 2
+  name: defect_leak_1
+  type: leak
+  is_defect: true
+  slot_id: 4
+  surface: wall_outer_south
+  position:
+  - 2.5
+  - -3.88
+  - 0.25
+  orientation:
+  - 0.0
+  - 0.0
+  - 1.571
+- id: 3
+  name: defect_rust_2
+  type: rust
+  is_defect: true
+  slot_id: 7
+  surface: wall_outer_west
+  position:
+  - -4.88
+  - 2.0
+  - 0.25
+  orientation:
+  - 0.0
+  - 0.0
+  - 0.0
+- id: 4
+  name: defect_leak_2
+  type: leak
+  is_defect: true
+  slot_id: 13
+  surface: floor
+  position:
+  - 2.0
+  - 1.5
+  - 0.02
+  orientation:
+  - 0.0
+  - 0.0
+  - 0.0
+- id: 5
+  name: defect_leak_3
+  type: leak
+  is_defect: true
+  slot_id: 11
+  surface: wall_outer_east
+  position:
+  - 4.88
+  - -1.0
+  - 0.25
+  orientation:
+  - 0.0
+  - 0.0
+  - 3.142
+- id: 6
+  name: defect_leak_4
+  type: leak
+  is_defect: true
+  slot_id: 8
+  surface: wall_outer_north
+  position:
+  - -1.5
+  - 3.88
+  - 0.25
+  orientation:
+  - 0.0
+  - 0.0
+  - -1.571
+distractors:
+- id: 1
+  name: distractor_1_yellow_bucket
+  category: yellow_bucket
+  color: yellow
+  is_defect: false
+  slot_id: 9
+  surface: wall_outer_south
+  position:
+  - -2.5
+  - -3.88
+  - 0.25
+  orientation:
+  - 0.0
+  - 0.0
+  - 1.571
+- id: 2
+  name: distractor_2_red_barrel
+  category: red_barrel
+  color: red
+  is_defect: false
+  slot_id: 5
+  surface: wall_inner_north
+  position:
+  - 0.12
+  - 1.0
+  - 0.3
+  orientation:
+  - 0.0
+  - 0.0
+  - 0.0
