@@ -1,0 +1,14 @@
+defect_detector:
+  ros__parameters:
+    min_contour_area: 500
+    rust:
+      lower_hsv_1: [0, 100, 70]
+      upper_hsv_1: [10, 255, 255]
+      lower_hsv_2: [170, 100, 70]
+      upper_hsv_2: [180, 255, 255]
+    leak:
+      lower_hsv: [20, 100, 100]
+      upper_hsv: [35, 255, 255]
+    aruco:
+      dictionary: "DICT_4X4_50"
+      default_confidence: 0.95
