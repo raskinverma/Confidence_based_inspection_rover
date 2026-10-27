@@ -1,49 +1,66 @@
+# Reasonable baseline inspection waypoints covering all 14 defect slots
+# Design Rationale:
+# 1. Room_A_South ([-2.5, -1.8]): Clear line of sight to west wall south (slot 6), south wall (slot 9),
+#    floor puddle (slot 14), inner partition west face (slot 10), and sub-wall south face (slot 1).
+# 2. Room_A_North ([-2.0, 2.2]): Traversed via eastern passage of sub-wall; sweeps north wall (slot 8)
+#    and west wall north (slot 7).
+# 3. Corridor_East ([2.5, -3.0]): Entered via corridor west doorway; sweeps corridor south wall (slot 4)
+#    and corridor divider south face (slot 12).
+# 4. Room_B_West ([1.2, 0.5]): Traversed via central doorway into Room B; sweeps inner wall entrance (slot 5)
+#    and Room B floor puddle (slot 13).
+# 5. Room_B_North ([2.3, 2.3]): Northern bay facing industrial pipes; sweeps pipe leaks (slot 3).
+# 6. Room_B_East ([4.0, 1.5]): East bay facing east wall; sweeps east wall north (slot 2) and south (slot 11).
+# 7. Return_Home ([-2.0, -1.0]): Safe return to start location.
+#
+# Each waypoint performs an in-place 360-degree rotation (angular.z=0.8 rad/s for 8.0s) so all surrounding
+# candidate surfaces within range are observed by the camera.
+
 waypoints:
   - id: 1
-    name: "Room_A_Rust_Inspection"
+    name: "Room_A_South_Inspection"
     x: -2.5
-    y: -0.2
+    y: -1.8
     yaw: 1.5708
-    scan_duration: 3.0
+    scan_duration: 8.0
 
   - id: 2
-    name: "Room_A_ArUco_Tag_2"
-    x: -4.0
-    y: -2.0
-    yaw: 3.1415
-    scan_duration: 3.0
+    name: "Room_A_North_Inspection"
+    x: -2.0
+    y: 2.2
+    yaw: 1.5708
+    scan_duration: 8.0
 
   - id: 3
-    name: "Room_B_Entrance_ArUco_1"
-    x: 0.5
-    y: 0.8
-    yaw: 1.5708
-    scan_duration: 3.0
+    name: "Corridor_East_Inspection"
+    x: 2.5
+    y: -3.0
+    yaw: 0.0
+    scan_duration: 8.0
 
   - id: 4
-    name: "Room_B_Rust_Inspection"
+    name: "Room_B_West_Inspection"
+    x: 1.2
+    y: 0.5
+    yaw: 1.5708
+    scan_duration: 8.0
+
+  - id: 5
+    name: "Room_B_North_Pipes_Inspection"
+    x: 2.3
+    y: 2.3
+    yaw: 1.5708
+    scan_duration: 8.0
+
+  - id: 6
+    name: "Room_B_East_Inspection"
     x: 4.0
     y: 1.5
     yaw: 0.0
-    scan_duration: 3.0
-
-  - id: 5
-    name: "Room_B_Pipe_Leak_Inspection"
-    x: 2.3
-    y: 3.0
-    yaw: 1.5708
-    scan_duration: 3.0
-
-  - id: 6
-    name: "Corridor_Leak_Inspection"
-    x: 2.5
-    y: -3.0
-    yaw: -1.5708
-    scan_duration: 3.0
+    scan_duration: 8.0
 
   - id: 7
     name: "Return_Home"
     x: -2.0
     y: -1.0
     yaw: 0.0
-    scan_duration: 1.0
+    scan_duration: 2.0

@@ -2,62 +2,113 @@
 """
 Mission Manager Node for Inspection Rover
 Implements Finite State Machine (FSM):
-  IDLE -> NAV_TO_WP -> SCAN_INSPECT -> NEXT_WP -> RETURN_HOME -> COMPLETED
+  IDLE -> INITIALIZING -> NAVIGATING -> SCANNING -> NEXT_WP -> COMPLETED / FAILED
 Interacts with Nav2 NavigateToPose action server.
+
+Publishes:
+  /mission_status (std_msgs/msg/String: RUNNING, DONE, FAILED)
+  /initialpose (geometry_msgs/msg/PoseWithCovarianceStamped) to automatically localize Nav2
+  /cmd_vel (geometry_msgs/msg/Twist) for in-place 360-deg scanning sweeps
+
+Tracks Telemetry:
+  - Total path length integrated from /odom
+  - Minimum LiDAR clearance from /scan
+  - Mission duration from start to finish
+  - Writes run_telemetry.yaml to output_dir
 """
 
 import os
 import math
 import yaml
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, Twist
+from std_msgs.msg import String
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import PoseStamped, Twist, PoseWithCovarianceStamped
 from nav2_msgs.action import NavigateToPose
 from ament_index_python.packages import get_package_share_directory
 
 
 class MissionState:
     IDLE = "IDLE"
+    INITIALIZING = "INITIALIZING"
     NAVIGATING = "NAVIGATING"
     SCANNING = "SCANNING"
     NEXT_WP = "NEXT_WP"
-    RETURNING_HOME = "RETURNING_HOME"
     COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
 
 class MissionManager(Node):
     def __init__(self):
         super().__init__('mission_manager')
 
-        # Load waypoints
+        # Load parameters
         pkg_share = get_package_share_directory('rover_mission')
         default_wp_path = os.path.join(pkg_share, 'config', 'inspection_waypoints.yaml')
         self.declare_parameter('waypoints_file', default_wp_path)
+        self.declare_parameter('output_dir', 'results')
+        self.declare_parameter('initial_x', -2.0)
+        self.declare_parameter('initial_y', -1.0)
+        self.declare_parameter('initial_yaw', 0.0)
+
         wp_file = self.get_parameter('waypoints_file').get_parameter_value().string_value
+        out_dir = self.get_parameter('output_dir').get_parameter_value().string_value
+        self.initial_x = self.get_parameter('initial_x').get_parameter_value().double_value
+        self.initial_y = self.get_parameter('initial_y').get_parameter_value().double_value
+        self.initial_yaw = self.get_parameter('initial_yaw').get_parameter_value().double_value
+
+        self.output_dir = os.path.expanduser(out_dir)
+        if not os.path.isabs(self.output_dir):
+            self.output_dir = os.path.join(os.getcwd(), self.output_dir)
+        os.makedirs(self.output_dir, exist_ok=True)
 
         self.waypoints = self.load_waypoints(wp_file)
         self.current_wp_idx = 0
         self.state = MissionState.IDLE
         self.retry_count = 0
-        self.max_retries = 1
+        self.max_retries = 2
+        self.successful_wps = 0
+
+        # Telemetry variables
+        self.mission_start_time = None
+        self.mission_end_time = None
+        self.last_odom_pos = None
+        self.path_length = 0.0
+        self.min_clearance = float('inf')
+
+        # Publishers
+        latched_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE
+        )
+        self.pub_status = self.create_publisher(String, '/mission_status', latched_qos)
+        self.pub_initial_pose = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
+        self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
 
         # Nav2 Action Client
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
 
-        # Velocity publisher for in-place inspection scanning rotation
-        self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Subscriptions for telemetry
+        self.sub_odom = self.create_subscription(Odometry, '/odom', self.odom_cb, 20)
+        self.sub_scan = self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
 
-        # FSM execution loop timer (1.0 Hz)
-        self.timer = self.create_timer(1.0, self.fsm_step)
+        # Timers
+        self.timer_fsm = self.create_timer(0.1, self.fsm_step)  # 10 Hz control loop
+        self.init_pose_count = 0
 
         self.goal_handle = None
         self.scan_start_time = None
-        self.active_goal_future = None
+        self.waiting_for_server_logged = False
 
         self.get_logger().info(f"MissionManager initialized with {len(self.waypoints)} waypoints.")
+        self.publish_status("RUNNING")
 
     def load_waypoints(self, path):
         try:
@@ -68,6 +119,54 @@ class MissionManager(Node):
             self.get_logger().error(f"Failed to load waypoints from {path}: {e}")
             return []
 
+    def publish_status(self, status_str: str):
+        msg = String()
+        msg.data = status_str
+        self.pub_status.publish(msg)
+        self.get_logger().info(f"[/mission_status] -> {status_str}")
+
+    def odom_cb(self, msg: Odometry):
+        pos = msg.pose.pose.position
+        if self.state in (MissionState.NAVIGATING, MissionState.SCANNING, MissionState.NEXT_WP):
+            if self.last_odom_pos is not None:
+                dx = pos.x - self.last_odom_pos[0]
+                dy = pos.y - self.last_odom_pos[1]
+                dist = math.hypot(dx, dy)
+                if dist < 2.0:  # sanity check against odometry jumps
+                    self.path_length += dist
+            self.last_odom_pos = (pos.x, pos.y)
+
+    def scan_cb(self, msg: LaserScan):
+        if self.state in (MissionState.NAVIGATING, MissionState.SCANNING):
+            valid = [r for r in msg.ranges if msg.range_min < r < msg.range_max and not math.isnan(r) and not math.isinf(r)]
+            if valid:
+                curr_min = min(valid)
+                if curr_min < self.min_clearance:
+                    self.min_clearance = float(curr_min)
+
+    def publish_initial_pose(self):
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        msg.pose.pose.position.x = self.initial_x
+        msg.pose.pose.position.y = self.initial_y
+        msg.pose.pose.position.z = 0.0
+
+        q = self.yaw_to_quaternion(self.initial_yaw)
+        msg.pose.pose.orientation.x = q['x']
+        msg.pose.pose.orientation.y = q['y']
+        msg.pose.pose.orientation.z = q['z']
+        msg.pose.pose.orientation.w = q['w']
+
+        cov = [0.0] * 36
+        cov[0] = 0.25   # x var
+        cov[7] = 0.25   # y var
+        cov[35] = 0.068 # yaw var
+        msg.pose.covariance = cov
+
+        self.pub_initial_pose.publish(msg)
+        self.get_logger().info(f"Published /initialpose -> ({self.initial_x}, {self.initial_y}, yaw={self.initial_yaw})")
+
     def yaw_to_quaternion(self, yaw):
         return {
             'x': 0.0,
@@ -76,30 +175,62 @@ class MissionManager(Node):
             'w': math.cos(yaw / 2.0)
         }
 
+    def save_telemetry(self, status: str):
+        telemetry_file = os.path.join(self.output_dir, 'run_telemetry.yaml')
+        duration = 0.0
+        if self.mission_start_time is not None:
+            end = self.mission_end_time or self.get_clock().now()
+            duration = (end - self.mission_start_time).nanoseconds / 1e9
+
+        min_c = self.min_clearance if self.min_clearance != float('inf') else 0.0
+        data = {
+            'status': status,
+            'mission_duration_sec': round(float(duration), 2),
+            'path_length_m': round(float(self.path_length), 2),
+            'min_clearance_m': round(float(min_c), 3),
+            'waypoints_completed': int(self.successful_wps),
+            'waypoints_total': len(self.waypoints)
+        }
+        try:
+            with open(telemetry_file, 'w') as f:
+                yaml.safe_dump(data, f, default_flow_style=False)
+            self.get_logger().info(f"Saved run telemetry to {telemetry_file}: {data}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to write telemetry: {e}")
+
     def fsm_step(self):
         if self.state == MissionState.IDLE:
-            if not self.waypoints:
-                self.get_logger().warn("No waypoints loaded. Standing by.")
+            # Publish initial pose a couple of times to anchor AMCL
+            if self.init_pose_count < 3:
+                self.publish_initial_pose()
+                self.init_pose_count += 1
                 return
 
-            self.get_logger().info("Waiting for Nav2 action server 'navigate_to_pose'...")
-            if self.nav_client.wait_for_server(timeout_sec=2.0):
+            if not self.waypoints:
+                self.get_logger().error("No waypoints configured. Mission failed.")
+                self.transition_to(MissionState.FAILED)
+                return
+
+            if not self.waiting_for_server_logged:
+                self.get_logger().info("Waiting for Nav2 action server 'navigate_to_pose'...")
+                self.waiting_for_server_logged = True
+
+            if self.nav_client.wait_for_server(timeout_sec=0.1):
                 self.get_logger().info("Nav2 server ready. Starting autonomous mission.")
+                self.mission_start_time = self.get_clock().now()
                 self.transition_to(MissionState.NAVIGATING)
                 self.send_current_goal()
-            else:
-                self.get_logger().warn("Waiting for navigate_to_pose action server...")
 
         elif self.state == MissionState.SCANNING:
             now = self.get_clock().now()
             elapsed = (now - self.scan_start_time).nanoseconds / 1e9
             wp = self.waypoints[self.current_wp_idx]
-            duration = wp.get('scan_duration', 3.0)
+            duration = float(wp.get('scan_duration', 8.0))
 
             if elapsed < duration:
-                # Rotate gently in place to sweep the camera across the defect area
+                # Rotate smoothly in place at 0.8 rad/s (approx 360 deg in 8s)
                 cmd = Twist()
-                cmd.angular.z = 0.4
+                cmd.angular.z = 0.8
                 self.pub_cmd_vel.publish(cmd)
             else:
                 # Stop rotation
@@ -114,16 +245,26 @@ class MissionManager(Node):
                 self.transition_to(MissionState.NAVIGATING)
                 self.send_current_goal()
             else:
+                self.mission_end_time = self.get_clock().now()
                 self.transition_to(MissionState.COMPLETED)
+                self.publish_status("DONE")
+                self.save_telemetry("DONE")
                 self.get_logger().info("🎉 MISSION COMPLETE! All waypoints visited and inspected.")
 
     def transition_to(self, new_state):
         self.get_logger().info(f"[FSM TRANSITION] {self.state} -> {new_state}")
         self.state = new_state
+        if new_state == MissionState.FAILED:
+            self.mission_end_time = self.get_clock().now()
+            self.publish_status("FAILED")
+            self.save_telemetry("FAILED")
 
     def send_current_goal(self):
         wp = self.waypoints[self.current_wp_idx]
-        self.get_logger().info(f"Navigating to WP #{wp['id']} ({wp['name']}): ({wp['x']}, {wp['y']}, yaw={wp['yaw']})")
+        self.get_logger().info(
+            f"Navigating to WP #{wp['id']}/{len(self.waypoints)} ({wp['name']}): "
+            f"({wp['x']}, {wp['y']}, yaw={wp['yaw']})"
+        )
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
@@ -132,7 +273,7 @@ class MissionManager(Node):
         goal_msg.pose.pose.position.y = float(wp['y'])
         goal_msg.pose.pose.position.z = 0.0
 
-        q = self.yaw_to_quaternion(wp['yaw'])
+        q = self.yaw_to_quaternion(float(wp['yaw']))
         goal_msg.pose.pose.orientation.x = q['x']
         goal_msg.pose.pose.orientation.y = q['y']
         goal_msg.pose.pose.orientation.z = q['z']
@@ -142,25 +283,39 @@ class MissionManager(Node):
         send_future.add_done_callback(self.goal_response_callback)
 
     def goal_response_callback(self, future):
-        goal_handle = future.result()
+        try:
+            goal_handle = future.result()
+        except Exception as e:
+            self.get_logger().error(f"Failed to send goal: {e}")
+            self.handle_nav_failure()
+            return
+
         if not goal_handle.accepted:
             self.get_logger().warn("Goal was rejected by Nav2!")
             self.handle_nav_failure()
             return
 
-        self.get_logger().info("Goal accepted by Nav2. Moving...")
+        self.get_logger().info(f"Goal accepted by Nav2 (WP #{self.waypoints[self.current_wp_idx]['id']}). Moving...")
         self.goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self.goal_result_callback)
 
     def goal_result_callback(self, future):
-        status = future.result().status
+        try:
+            status = future.result().status
+        except Exception as e:
+            self.get_logger().error(f"Error getting goal result: {e}")
+            self.handle_nav_failure()
+            return
+
         if status == GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().info(f"Reached Waypoint #{self.waypoints[self.current_wp_idx]['id']} successfully.")
+            wp_id = self.waypoints[self.current_wp_idx]['id']
+            self.successful_wps += 1
+            self.get_logger().info(f"Reached Waypoint #{wp_id} successfully.")
             self.scan_start_time = self.get_clock().now()
             self.transition_to(MissionState.SCANNING)
         else:
-            self.get_logger().warn(f"Goal failed with status: {status}")
+            self.get_logger().warn(f"Goal failed with Nav2 status: {status}")
             self.handle_nav_failure()
 
     def handle_nav_failure(self):
@@ -169,7 +324,7 @@ class MissionManager(Node):
             self.get_logger().info(f"Retrying waypoint ({self.retry_count}/{self.max_retries})...")
             self.send_current_goal()
         else:
-            self.get_logger().warn("Max retries exceeded. Skipping to next waypoint.")
+            self.get_logger().warn(f"Max retries exceeded for WP #{self.waypoints[self.current_wp_idx]['id']}. Skipping to next.")
             self.transition_to(MissionState.NEXT_WP)
 
 
@@ -182,7 +337,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

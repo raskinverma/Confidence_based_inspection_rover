@@ -134,7 +134,10 @@ def generate_launch_description():
         executable='mission_manager',
         name='mission_manager',
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}],
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'output_dir': output_dir
+        }],
         condition=IfCondition(run_mission)
     )
 
