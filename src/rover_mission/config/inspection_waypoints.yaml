@@ -1,15 +1,18 @@
 # Reasonable baseline inspection waypoints covering all 14 defect slots
 # Design Rationale:
-# 1. Room_A_South ([-2.5, -1.8]): Clear line of sight to west wall south (slot 6), south wall (slot 9),
-#    floor puddle (slot 14), inner partition west face (slot 10), and sub-wall south face (slot 1).
-# 2. Room_A_North ([-2.0, 2.2]): Traversed via eastern passage of sub-wall; sweeps north wall (slot 8)
-#    and west wall north (slot 7).
-# 3. Corridor_East ([2.5, -3.0]): Entered via corridor west doorway; sweeps corridor south wall (slot 4)
-#    and corridor divider south face (slot 12).
-# 4. Room_B_West ([1.2, 0.5]): Traversed via central doorway into Room B; sweeps inner wall entrance (slot 5)
-#    and Room B floor puddle (slot 13).
-# 5. Room_B_North ([2.3, 2.3]): Northern bay facing industrial pipes; sweeps pipe leaks (slot 3).
-# 6. Room_B_East ([4.0, 1.5]): East bay facing east wall; sweeps east wall north (slot 2) and south (slot 11).
+# 1. Room_A_South ([-2.0, -1.5]): Open center of Room A South. Direct line of sight to
+#    west wall south (slot 6, 2.9m), south wall (slot 9, 2.4m), floor puddle (slot 14, 1.0m),
+#    inner partition west face (slot 10, 1.9m), and sub-wall south face (slot 1, 1.9m).
+# 2. Corridor_Entrance ([0.8, -3.0]): Just inside corridor doorway from Room A South.
+#    Direct line of sight east down corridor to south wall (slot 4, 1.9m) and divider (slot 12, 1.9m).
+# 3. Room_A_North ([-2.0, 2.0]): Traversed via eastern passage of sub-wall. Sweeps north wall (slot 8, 1.9m),
+#    west wall north (slot 7, 2.9m), and sub-wall north face.
+# 4. Room_B_Entrance ([1.0, 0.5]): Traversed via central doorway into Room B. Sweeps inner wall entrance (slot 5, 1.0m)
+#    and Room B floor puddle (slot 13, 1.4m).
+# 5. Room_B_North_Pipes ([2.2, 2.2]): Northern bay facing industrial pipes. Sweeps pipe leaks (slot 3, 1.7m)
+#    and north-east wall.
+# 6. Room_B_East_Open ([3.2, 1.8]): Open area north of shelf rack. Direct line of sight to east wall north (slot 2, 1.7m)
+#    and east wall south (slot 11, 3.2m).
 # 7. Return_Home ([-2.0, -1.0]): Safe return to start location.
 #
 # Each waypoint performs an in-place 360-degree rotation (angular.z=0.8 rad/s for 8.0s) so all surrounding
@@ -18,43 +21,43 @@
 waypoints:
   - id: 1
     name: "Room_A_South_Inspection"
-    x: -2.5
-    y: -1.8
-    yaw: 1.5708
+    x: -2.0
+    y: -1.5
+    yaw: 0.0
     scan_duration: 8.0
 
   - id: 2
-    name: "Room_A_North_Inspection"
-    x: -2.0
-    y: 2.2
-    yaw: 1.5708
-    scan_duration: 8.0
-
-  - id: 3
-    name: "Corridor_East_Inspection"
-    x: 2.5
+    name: "Corridor_Entrance_Inspection"
+    x: 0.8
     y: -3.0
     yaw: 0.0
     scan_duration: 8.0
 
-  - id: 4
-    name: "Room_B_West_Inspection"
-    x: 1.2
-    y: 0.5
+  - id: 3
+    name: "Room_A_North_Inspection"
+    x: -2.0
+    y: 2.0
     yaw: 1.5708
+    scan_duration: 8.0
+
+  - id: 4
+    name: "Room_B_Entrance_Inspection"
+    x: 1.0
+    y: 0.5
+    yaw: 0.0
     scan_duration: 8.0
 
   - id: 5
     name: "Room_B_North_Pipes_Inspection"
-    x: 2.3
-    y: 2.3
+    x: 2.2
+    y: 2.2
     yaw: 1.5708
     scan_duration: 8.0
 
   - id: 6
     name: "Room_B_East_Inspection"
-    x: 4.0
-    y: 1.5
+    x: 3.2
+    y: 1.8
     yaw: 0.0
     scan_duration: 8.0
 
