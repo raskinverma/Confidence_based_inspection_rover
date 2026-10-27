@@ -2,7 +2,7 @@
 """
 Mission Manager Node for Inspection Rover
 Implements Finite State Machine (FSM):
-  IDLE -> INITIALIZING -> NAVIGATING -> SCANNING -> NEXT_WP -> COMPLETED / FAILED
+  IDLE -> WAITING_NAV2 -> LOCALIZING -> NAVIGATING -> SCANNING -> NEXT_WP -> COMPLETED / FAILED
 Interacts with Nav2 NavigateToPose action server.
 
 Publishes:
@@ -19,6 +19,7 @@ Tracks Telemetry:
 
 import os
 import math
+import time
 import yaml
 import numpy as np
 import rclpy
@@ -31,13 +32,16 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PoseStamped, Twist, PoseWithCovarianceStamped
 from nav2_msgs.action import NavigateToPose
+from lifecycle_msgs.srv import GetState
 from ament_index_python.packages import get_package_share_directory
 
 
 class MissionState:
     IDLE = "IDLE"
-    INITIALIZING = "INITIALIZING"
+    WAITING_NAV2 = "WAITING_NAV2"
+    LOCALIZING = "LOCALIZING"
     NAVIGATING = "NAVIGATING"
+    RETRY_WAIT = "RETRY_WAIT"
     SCANNING = "SCANNING"
     NEXT_WP = "NEXT_WP"
     COMPLETED = "COMPLETED"
@@ -92,20 +96,23 @@ class MissionManager(Node):
         self.pub_initial_pose = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        # Nav2 Action Client
+        # Nav2 Action Client & Lifecycle Service Client
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.lifecycle_client = self.create_client(GetState, '/bt_navigator/get_state')
 
         # Subscriptions for telemetry
         self.sub_odom = self.create_subscription(Odometry, '/odom', self.odom_cb, 20)
         self.sub_scan = self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
 
-        # Timers
-        self.timer_fsm = self.create_timer(0.1, self.fsm_step)  # 10 Hz control loop
-        self.init_pose_count = 0
+        # Control loop timer (10 Hz)
+        self.timer_fsm = self.create_timer(0.1, self.fsm_step)
 
         self.goal_handle = None
         self.scan_start_time = None
-        self.waiting_for_server_logged = False
+        self.localize_start_time = None
+        self.retry_wait_start = None
+        self.lifecycle_req_future = None
+        self.last_poll_time = 0.0
 
         self.get_logger().info(f"MissionManager initialized with {len(self.waypoints)} waypoints.")
         self.publish_status("RUNNING")
@@ -132,7 +139,7 @@ class MissionManager(Node):
                 dx = pos.x - self.last_odom_pos[0]
                 dy = pos.y - self.last_odom_pos[1]
                 dist = math.hypot(dx, dy)
-                if dist < 2.0:  # sanity check against odometry jumps
+                if dist < 2.0:  # ignore odometry resets
                     self.path_length += dist
             self.last_odom_pos = (pos.x, pos.y)
 
@@ -199,25 +206,61 @@ class MissionManager(Node):
             self.get_logger().error(f"Failed to write telemetry: {e}")
 
     def fsm_step(self):
+        now_sec = time.time()
+
         if self.state == MissionState.IDLE:
-            # Publish initial pose a couple of times to anchor AMCL
-            if self.init_pose_count < 3:
-                self.publish_initial_pose()
-                self.init_pose_count += 1
-                return
+            # Check if Nav2 action server is available
+            if self.nav_client.wait_for_server(timeout_sec=0.01):
+                # Also check if bt_navigator is active via lifecycle service
+                if self.lifecycle_client.service_is_ready():
+                    self.transition_to(MissionState.WAITING_NAV2)
+                else:
+                    if now_sec - self.last_poll_time > 3.0:
+                        self.get_logger().info("Waiting for /bt_navigator/get_state service...")
+                        self.last_poll_time = now_sec
+            else:
+                if now_sec - self.last_poll_time > 3.0:
+                    self.get_logger().info("Waiting for Nav2 'navigate_to_pose' action server...")
+                    self.last_poll_time = now_sec
 
-            if not self.waypoints:
-                self.get_logger().error("No waypoints configured. Mission failed.")
-                self.transition_to(MissionState.FAILED)
-                return
+        elif self.state == MissionState.WAITING_NAV2:
+            if self.lifecycle_req_future is None:
+                req = GetState.Request()
+                self.lifecycle_req_future = self.lifecycle_client.call_async(req)
+            elif self.lifecycle_req_future.done():
+                try:
+                    resp = self.lifecycle_req_future.result()
+                    state_label = resp.current_state.label
+                    self.get_logger().info(f"bt_navigator lifecycle state: '{state_label}'")
+                    if state_label == 'active':
+                        self.get_logger().info("Nav2 bt_navigator is ACTIVE. Publishing /initialpose...")
+                        self.publish_initial_pose()
+                        self.localize_start_time = self.get_clock().now()
+                        self.transition_to(MissionState.LOCALIZING)
+                    else:
+                        self.lifecycle_req_future = None
+                except Exception as e:
+                    self.get_logger().warn(f"Failed to get lifecycle state: {e}")
+                    self.lifecycle_req_future = None
 
-            if not self.waiting_for_server_logged:
-                self.get_logger().info("Waiting for Nav2 action server 'navigate_to_pose'...")
-                self.waiting_for_server_logged = True
-
-            if self.nav_client.wait_for_server(timeout_sec=0.1):
-                self.get_logger().info("Nav2 server ready. Starting autonomous mission.")
+        elif self.state == MissionState.LOCALIZING:
+            # Allow 2.0 seconds for AMCL particle filter to settle after initial pose
+            elapsed = (self.get_clock().now() - self.localize_start_time).nanoseconds / 1e9
+            if elapsed < 2.0:
+                # Re-publish initial pose once more during settling
+                if elapsed > 1.0 and getattr(self, '_repub_done', False) is False:
+                    self.publish_initial_pose()
+                    self._repub_done = True
+            else:
+                self.get_logger().info("Localization established. Starting autonomous inspection mission!")
                 self.mission_start_time = self.get_clock().now()
+                self.transition_to(MissionState.NAVIGATING)
+                self.send_current_goal()
+
+        elif self.state == MissionState.RETRY_WAIT:
+            # Wait 3.0s before retrying to let Nav2 clear its internal state
+            elapsed = (self.get_clock().now() - self.retry_wait_start).nanoseconds / 1e9
+            if elapsed >= 3.0:
                 self.transition_to(MissionState.NAVIGATING)
                 self.send_current_goal()
 
@@ -246,10 +289,16 @@ class MissionManager(Node):
                 self.send_current_goal()
             else:
                 self.mission_end_time = self.get_clock().now()
-                self.transition_to(MissionState.COMPLETED)
-                self.publish_status("DONE")
-                self.save_telemetry("DONE")
-                self.get_logger().info("🎉 MISSION COMPLETE! All waypoints visited and inspected.")
+                if self.successful_wps > 0:
+                    self.transition_to(MissionState.COMPLETED)
+                    self.publish_status("DONE")
+                    self.save_telemetry("DONE")
+                    self.get_logger().info("🎉 MISSION COMPLETE! All waypoints visited and inspected.")
+                else:
+                    self.transition_to(MissionState.FAILED)
+                    self.publish_status("FAILED")
+                    self.save_telemetry("FAILED")
+                    self.get_logger().error("Mission finished with 0 successful waypoints. Status: FAILED.")
 
     def transition_to(self, new_state):
         self.get_logger().info(f"[FSM TRANSITION] {self.state} -> {new_state}")
@@ -287,12 +336,12 @@ class MissionManager(Node):
             goal_handle = future.result()
         except Exception as e:
             self.get_logger().error(f"Failed to send goal: {e}")
-            self.handle_nav_failure()
+            self.handle_nav_failure(reject=True)
             return
 
         if not goal_handle.accepted:
             self.get_logger().warn("Goal was rejected by Nav2!")
-            self.handle_nav_failure()
+            self.handle_nav_failure(reject=True)
             return
 
         self.get_logger().info(f"Goal accepted by Nav2 (WP #{self.waypoints[self.current_wp_idx]['id']}). Moving...")
@@ -305,7 +354,7 @@ class MissionManager(Node):
             status = future.result().status
         except Exception as e:
             self.get_logger().error(f"Error getting goal result: {e}")
-            self.handle_nav_failure()
+            self.handle_nav_failure(reject=False)
             return
 
         if status == GoalStatus.STATUS_SUCCEEDED:
@@ -316,13 +365,14 @@ class MissionManager(Node):
             self.transition_to(MissionState.SCANNING)
         else:
             self.get_logger().warn(f"Goal failed with Nav2 status: {status}")
-            self.handle_nav_failure()
+            self.handle_nav_failure(reject=False)
 
-    def handle_nav_failure(self):
+    def handle_nav_failure(self, reject: bool = False):
         if self.retry_count < self.max_retries:
             self.retry_count += 1
-            self.get_logger().info(f"Retrying waypoint ({self.retry_count}/{self.max_retries})...")
-            self.send_current_goal()
+            self.get_logger().info(f"Retrying waypoint ({self.retry_count}/{self.max_retries}) after backoff...")
+            self.retry_wait_start = self.get_clock().now()
+            self.transition_to(MissionState.RETRY_WAIT)
         else:
             self.get_logger().warn(f"Max retries exceeded for WP #{self.waypoints[self.current_wp_idx]['id']}. Skipping to next.")
             self.transition_to(MissionState.NEXT_WP)

@@ -51,22 +51,24 @@ def generate_world(seed: int, condition: str, num_distractors: int, camera_noise
     output_dir = os.path.join(workspace_root, 'src', 'rover_gazebo', 'worlds')
     gen_script = os.path.join(workspace_root, 'tools', 'generate_world.py')
 
+    sdf_path = os.path.join(output_dir, f"{world_name}.sdf")
+    gt_path = os.path.join(output_dir, f"{world_name}_ground_truth.yaml")
+
     cmd = [
         sys.executable, gen_script,
         '--seed', str(seed),
         '--num-defects', '6',
         '--num-distractors', str(num_distractors),
         '--camera-noise', str(camera_noise),
-        '--output-dir', output_dir,
-        '--world-name', world_name
+        '--output-sdf', sdf_path,
+        '--output-gt', gt_path,
+        '--validate'
     ]
     print(f"[{world_name}] Generating world (seed={seed}, distractors={num_distractors}, noise={camera_noise})...")
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res.returncode != 0:
         raise RuntimeError(f"World generation failed: {res.stderr}")
 
-    sdf_path = os.path.join(output_dir, f"{world_name}.sdf")
-    gt_path = os.path.join(output_dir, f"{world_name}_ground_truth.yaml")
     return sdf_path, gt_path
 
 
