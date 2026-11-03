@@ -170,6 +170,18 @@ def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str,
     metrics['wall_time_sec'] = wall_time
     metrics['run_id'] = run_id
 
+    # Count rejected observations logged by pose_projector
+    rejected_count = 0
+    if os.path.exists(log_file_path):
+        try:
+            with open(log_file_path, 'r', errors='replace') as lf:
+                for line in lf:
+                    if 'Rejected observation' in line:
+                        rejected_count += 1
+        except Exception:
+            pass
+    metrics['rejected_observations'] = rejected_count
+
     return metrics
 
 
@@ -179,7 +191,7 @@ def main():
     parser.add_argument('--seeds', nargs='+', type=int, default=[1, 2, 3, 4, 5], help="List of seeds to run")
     parser.add_argument('--conditions', nargs='+', default=['clean', 'hard'], choices=['clean', 'hard'],
                         help="Conditions to run (clean, hard)")
-    parser.add_argument('--timeout', type=int, default=320, help="Per-run timeout in seconds")
+    parser.add_argument('--timeout', type=int, default=420, help="Per-run timeout in seconds")
     parser.add_argument('--output-csv', default='results/runs.csv', help="CSV file to append results")
     args = parser.parse_args()
 
