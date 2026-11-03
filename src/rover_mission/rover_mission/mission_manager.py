@@ -30,7 +30,7 @@ from action_msgs.msg import GoalStatus
 from std_msgs.msg import String
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import PoseStamped, Twist, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, Twist, PoseWithCovarianceStamped, Pose
 from nav2_msgs.action import NavigateToPose
 from lifecycle_msgs.srv import GetState
 from ament_index_python.packages import get_package_share_directory
@@ -86,6 +86,14 @@ class MissionManager(Node):
         self.path_length = 0.0
         self.min_clearance = float('inf')
 
+        # Localization telemetry
+        self.latest_amcl_pos = None
+        self.latest_gz_pos = None
+        self.initial_loc_err = None
+        self.loc_errors = []
+        self.max_loc_err = 0.0
+        self._last_telemetry_save = 0.0
+
         # Publishers
         latched_qos = QoSProfile(
             depth=1,
@@ -103,6 +111,8 @@ class MissionManager(Node):
         # Subscriptions for telemetry
         self.sub_odom = self.create_subscription(Odometry, '/odom', self.odom_cb, 20)
         self.sub_scan = self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
+        self.sub_amcl_pose = self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.amcl_pose_cb, 10)
+        self.sub_gz_pose = self.create_subscription(Pose, '/gz/robot_pose', self.gz_pose_cb, 10)
 
         # Control loop timer (10 Hz)
         self.timer_fsm = self.create_timer(0.1, self.fsm_step)
@@ -151,6 +161,28 @@ class MissionManager(Node):
                 if curr_min < self.min_clearance:
                     self.min_clearance = float(curr_min)
 
+    def amcl_pose_cb(self, msg: PoseWithCovarianceStamped):
+        self.latest_amcl_pos = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+        self.compute_localization_error()
+
+    def gz_pose_cb(self, msg: Pose):
+        self.latest_gz_pos = (msg.position.x, msg.position.y)
+        self.compute_localization_error()
+
+    def compute_localization_error(self):
+        if self.latest_amcl_pos is not None and self.latest_gz_pos is not None:
+            err = math.hypot(
+                self.latest_amcl_pos[0] - self.latest_gz_pos[0],
+                self.latest_amcl_pos[1] - self.latest_gz_pos[1]
+            )
+            if self.initial_loc_err is None and self.state in (MissionState.LOCALIZING, MissionState.NAVIGATING):
+                self.initial_loc_err = err
+                self.get_logger().info(f"Initial localization error: {err:.4f} m (AMCL vs Gazebo GT)")
+            if self.state in (MissionState.LOCALIZING, MissionState.NAVIGATING, MissionState.SCANNING, MissionState.NEXT_WP):
+                self.loc_errors.append(err)
+                if err > self.max_loc_err:
+                    self.max_loc_err = err
+
     def publish_initial_pose(self):
         msg = PoseWithCovarianceStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -190,23 +222,34 @@ class MissionManager(Node):
             duration = (end - self.mission_start_time).nanoseconds / 1e9
 
         min_c = self.min_clearance if self.min_clearance != float('inf') else 0.0
+        mean_loc_err = float(np.mean(self.loc_errors)) if self.loc_errors else 0.0
+
         data = {
             'status': status,
             'mission_duration_sec': round(float(duration), 2),
+            'sim_time_sec': round(float(duration), 2),
             'path_length_m': round(float(self.path_length), 2),
             'min_clearance_m': round(float(min_c), 3),
             'waypoints_completed': int(self.successful_wps),
-            'waypoints_total': len(self.waypoints)
+            'waypoints_total': len(self.waypoints),
+            'initial_loc_error_m': round(float(self.initial_loc_err), 4) if self.initial_loc_err is not None else 0.0,
+            'mean_loc_error_m': round(mean_loc_err, 4),
+            'max_loc_error_m': round(float(self.max_loc_err), 4),
         }
         try:
             with open(telemetry_file, 'w') as f:
                 yaml.safe_dump(data, f, default_flow_style=False)
-            self.get_logger().info(f"Saved run telemetry to {telemetry_file}: {data}")
+            self.get_logger().debug(f"Saved run telemetry to {telemetry_file}: {data}")
         except Exception as e:
             self.get_logger().error(f"Failed to write telemetry: {e}")
 
     def fsm_step(self):
         now_sec = time.time()
+
+        # Periodically flush telemetry every 2 seconds during active mission
+        if self.mission_start_time is not None and (now_sec - self._last_telemetry_save >= 2.0):
+            self.save_telemetry(self.state)
+            self._last_telemetry_save = now_sec
 
         if self.state == MissionState.IDLE:
             # Check if Nav2 action server is available
@@ -376,6 +419,13 @@ class MissionManager(Node):
         else:
             self.get_logger().warn(f"Max retries exceeded for WP #{self.waypoints[self.current_wp_idx]['id']}. Skipping to next.")
             self.transition_to(MissionState.NEXT_WP)
+
+    def destroy_node(self):
+        try:
+            self.save_telemetry(self.state)
+        except Exception:
+            pass
+        super().destroy_node()
 
 
 def main(args=None):

@@ -2,12 +2,14 @@
 """
 Batch Runner for Inspection Rover (tools/run_batch.py)
 Automates end-to-end evaluation runs across seeds and conditions:
-  1. Generates world & ground truth using tools/generate_world.py
-  2. Launches the full simulation stack headless with process group isolation
-  3. Monitors /mission_status or run_telemetry.yaml for completion (DONE/FAILED/TIMEOUT)
-  4. Robustly terminates all Gazebo and ROS2 processes
-  5. Evaluates defect detections with tools/rover_eval.py
-  6. Appends comprehensive run metrics to results/runs.csv
+  1. Process group isolation and signal handling (SIGTERM -> SIGKILL after 5s)
+  2. Startup stray process gating
+  3. Unique ROS_DOMAIN_ID per run
+  4. Generates world & ground truth using tools/generate_world.py
+  5. Monitors /mission_status or run_telemetry.yaml for completion
+  6. Evaluates defect detections with tools/rover_eval.py
+  7. Tracks wall time, sim time, and RTF (sim / wall)
+  8. Appends comprehensive run metrics to results/runs.csv
 """
 
 import os
@@ -18,6 +20,7 @@ import subprocess
 import argparse
 import yaml
 import csv
+import psutil
 
 # Import evaluation module
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -35,15 +38,109 @@ CONDITIONS = {
     }
 }
 
+ACTIVE_PGID = None
+
+
+def find_stray_sim_processes():
+    """Finds any stray simulation or ROS2/Gazebo processes."""
+    stray = []
+    sim_patterns = [
+        'gz sim', 'gz-sim',
+        'ros2 launch',
+        'nav2_', 'bt_navigator', 'controller_server', 'planner_server',
+        'behavior_server', 'amcl', 'lifecycle_manager',
+        'mission_manager', 'defect_detector', 'pose_projector', 'twist_relay',
+        'parameter_bridge', 'ros_gz_bridge',
+        'robot_state_publisher'
+    ]
+    for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            cmdline = ' '.join(p.cmdline())
+            name = p.name()
+            # Ignore self, language servers, antigravity IDE tools
+            if p.pid == os.getpid() or 'language_server' in cmdline or 'antigravity' in cmdline or 'run_batch.py' in cmdline:
+                continue
+            for pat in sim_patterns:
+                if pat in name or pat in cmdline:
+                    stray.append({
+                        'pid': p.pid,
+                        'name': name,
+                        'cmdline': p.cmdline()
+                    })
+                    break
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return stray
+
+
+def kill_process_group(pgid: int, timeout: float = 5.0):
+    """Cleanly terminates a process group: SIGTERM, then SIGKILL after timeout seconds."""
+    if pgid is None:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    except Exception as e:
+        print(f"Error sending SIGTERM to pgid {pgid}: {e}")
+
+    start = time.time()
+    while time.time() - start < timeout:
+        alive = False
+        for p in psutil.process_iter(['pid']):
+            try:
+                if os.getpgid(p.pid) == pgid:
+                    alive = True
+                    break
+            except (ProcessLookupError, psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        if not alive:
+            return
+        time.sleep(0.2)
+
+    # Force kill with SIGKILL if still running
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    except Exception as e:
+        print(f"Error sending SIGKILL to pgid {pgid}: {e}")
+
 
 def kill_all_sim_processes():
-    """Aggressively kills any stray gz, ros2, or nav2 processes."""
-    try:
-        subprocess.run(['pkill', '-9', '-f', 'gz sim|ros2|nav2|mission_manager|defect_detector|pose_projector'],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2.0)
-    except Exception:
-        pass
+    """Fallback teardown: terminates any remaining stray simulation processes."""
+    stray = find_stray_sim_processes()
+    for s in stray:
+        try:
+            p = psutil.Process(s['pid'])
+            p.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    time.sleep(1.0)
+    stray = find_stray_sim_processes()
+    for s in stray:
+        try:
+            p = psutil.Process(s['pid'])
+            p.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+
+def signal_handler(signum, frame):
+    """Catches SIGINT (Ctrl-C) and SIGTERM to ensure clean process teardown."""
+    global ACTIVE_PGID
+    sig_name = "SIGINT (Ctrl-C)" if signum == signal.SIGINT else "SIGTERM"
+    print(f"\n[run_batch] Caught {sig_name}. Initiating clean shutdown...")
+    if ACTIVE_PGID is not None:
+        print(f"[run_batch] Terminating active simulation process group (PGID {ACTIVE_PGID})...")
+        kill_process_group(ACTIVE_PGID, timeout=5.0)
+        ACTIVE_PGID = None
+    kill_all_sim_processes()
+    sys.exit(130 if signum == signal.SIGINT else 143)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 
 def generate_world(seed: int, condition: str, num_distractors: int, camera_noise: float, workspace_root: str):
@@ -73,7 +170,8 @@ def generate_world(seed: int, condition: str, num_distractors: int, camera_noise
 
 
 def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str, gt_path: str,
-                          workspace_root: str, timeout_sec: int = 360):
+                          workspace_root: str, timeout_sec: int = 900):
+    global ACTIVE_PGID
     run_id = f"{method}_{condition}_seed{seed}"
     run_output_dir = os.path.join(workspace_root, 'results', run_id)
     os.makedirs(run_output_dir, exist_ok=True)
@@ -86,6 +184,11 @@ def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str,
         if os.path.exists(f):
             os.remove(f)
 
+    # Isolated ROS_DOMAIN_ID per run to eliminate cross-talk
+    domain_id = (seed * 17 + (1 if condition == 'clean' else 2) + (os.getpid() % 50)) % 101 + 1
+    run_env = os.environ.copy()
+    run_env['ROS_DOMAIN_ID'] = str(domain_id)
+
     # Launch command
     launch_cmd = (
         f"source /opt/ros/jazzy/setup.bash && "
@@ -97,7 +200,7 @@ def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str,
     )
 
     log_file_path = os.path.join(run_output_dir, 'sim.log')
-    print(f"[{run_id}] Launching simulation stack (headless=True, timeout={timeout_sec}s)...")
+    print(f"[{run_id}] Launching simulation stack (headless=True, timeout={timeout_sec}s, ROS_DOMAIN_ID={domain_id})...")
     start_wall_time = time.time()
 
     with open(log_file_path, 'w') as log_file:
@@ -107,8 +210,10 @@ def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str,
             executable='/bin/bash',
             stdout=log_file,
             stderr=subprocess.STDOUT,
-            preexec_fn=os.setsid  # New process group for clean teardown
+            start_new_session=True,  # New session & process group
+            env=run_env
         )
+        ACTIVE_PGID = proc.pid
 
     mission_status = "RUNNING"
     try:
@@ -137,38 +242,57 @@ def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str,
             mission_status = "TIMEOUT"
             print(f"[{run_id}] Run timed out after {timeout_sec}s")
     finally:
-        # Tear down process group
-        print(f"[{run_id}] Terminating simulation process group...")
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-            time.sleep(3.0)
-            if proc.poll() is None:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:
-            pass
-        kill_all_sim_processes()
+        # Tear down process group: SIGTERM, then SIGKILL after 5s
+        print(f"[{run_id}] Terminating simulation process group (PGID {proc.pid})...")
+        kill_process_group(proc.pid, timeout=5.0)
+        ACTIVE_PGID = None
+
+        # Verify no processes from this run or simulation remain
+        stray = find_stray_sim_processes()
+        if stray:
+            print(f"[{run_id}] Cleaning up {len(stray)} residual simulation processes...")
+            kill_all_sim_processes()
 
     wall_time = round(time.time() - start_wall_time, 2)
-    print(f"[{run_id}] Simulation finished. Wall time: {wall_time}s, Status: {mission_status}")
 
-    # If telemetry wasn't saved by mission_manager (e.g. timeout), write fallback telemetry
+    # Read telemetry written by mission_manager (which flushes periodically and on exit)
+    tel_data = {}
+    if os.path.exists(telemetry_yaml):
+        try:
+            with open(telemetry_yaml, 'r') as tf:
+                tel_data = yaml.safe_load(tf) or {}
+        except Exception:
+            pass
+
+    sim_time = float(tel_data.get('sim_time_sec', tel_data.get('mission_duration_sec', 0.0)))
+    rtf = round(sim_time / wall_time, 3) if wall_time > 0 else 0.0
+
+    print(f"[{run_id}] Simulation finished. Wall time: {wall_time}s, Sim time: {sim_time}s (RTF: {rtf}), Status: {mission_status}")
+
+    # If telemetry wasn't saved by mission_manager (e.g. fatal crash), write fallback telemetry
     if not os.path.exists(telemetry_yaml):
         with open(telemetry_yaml, 'w') as tf:
             yaml.safe_dump({
                 'status': mission_status,
-                'mission_duration_sec': wall_time,
+                'mission_duration_sec': sim_time,
+                'sim_time_sec': sim_time,
                 'path_length_m': 0.0,
                 'min_clearance_m': 0.0,
                 'waypoints_completed': 0,
-                'waypoints_total': 7
+                'waypoints_total': 7,
+                'initial_loc_error_m': 0.0,
+                'mean_loc_error_m': 0.0,
+                'max_loc_error_m': 0.0
             }, tf)
 
     # Run evaluation
     metrics = evaluate_run(gt_path, defects_csv, telemetry_yaml)
     metrics['method'] = method
     metrics['condition'] = condition
-    metrics['wall_time_sec'] = wall_time
     metrics['run_id'] = run_id
+    metrics['sim_time_sec'] = sim_time
+    metrics['wall_time_sec'] = wall_time
+    metrics['rtf'] = rtf
 
     # Count rejected observations logged by pose_projector
     rejected_count = 0
@@ -191,16 +315,32 @@ def main():
     parser.add_argument('--seeds', nargs='+', type=int, default=[1, 2, 3, 4, 5], help="List of seeds to run")
     parser.add_argument('--conditions', nargs='+', default=['clean', 'hard'], choices=['clean', 'hard'],
                         help="Conditions to run (clean, hard)")
-    parser.add_argument('--timeout', type=int, default=420, help="Per-run timeout in seconds")
+    parser.add_argument('--timeout', type=int, default=900, help="Per-run timeout in seconds (default: 900s)")
     parser.add_argument('--output-csv', default='results/runs.csv', help="CSV file to append results")
+    parser.add_argument('--force-clean', action='store_true', help="Clean stray processes automatically at startup")
     args = parser.parse_args()
 
     workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     csv_path = os.path.join(workspace_root, args.output_csv)
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
 
-    # Initial safety kill
-    kill_all_sim_processes()
+    # Startup Stray Process Gating
+    stray = find_stray_sim_processes()
+    if stray:
+        if args.force_clean:
+            print(f"Startup: found {len(stray)} stray processes. Cleaning as requested by --force-clean...")
+            kill_all_sim_processes()
+        else:
+            print("=" * 70)
+            print("ERROR: Stray simulation processes detected running at startup:")
+            print(f"{'PID':<8} {'NAME':<20} {'COMMAND':<40}")
+            print("-" * 70)
+            for p in stray:
+                cmd_str = ' '.join(p['cmdline'])[:40]
+                print(f"{p['pid']:<8} {p['name']:<20} {cmd_str:<40}")
+            print("=" * 70)
+            print("Refusing to run batch. Please terminate stray processes first or use --force-clean.")
+            sys.exit(1)
 
     runs_to_execute = []
     for cond in args.conditions:

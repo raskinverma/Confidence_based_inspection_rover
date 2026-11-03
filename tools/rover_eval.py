@@ -197,11 +197,15 @@ def evaluate_run(gt_file, csv_file, telemetry_file=None):
         'recall_R1.00': res_100['recall_R1.00'],
         # Telemetry
         'mission_status': telemetry.get('status', 'UNKNOWN'),
-        'mission_duration_sec': telemetry.get('mission_duration_sec', 0.0),
+        'mission_duration_sec': telemetry.get('sim_time_sec', telemetry.get('mission_duration_sec', 0.0)),
+        'sim_time_sec': telemetry.get('sim_time_sec', telemetry.get('mission_duration_sec', 0.0)),
         'path_length_m': telemetry.get('path_length_m', 0.0),
         'min_clearance_m': telemetry.get('min_clearance_m', 0.0),
         'waypoints_completed': telemetry.get('waypoints_completed', 0),
         'waypoints_total': telemetry.get('waypoints_total', 0),
+        'initial_loc_error': telemetry.get('initial_loc_error_m', 0.0),
+        'mean_loc_error': telemetry.get('mean_loc_error_m', 0.0),
+        'max_loc_error': telemetry.get('max_loc_error_m', 0.0),
     }
     return row
 

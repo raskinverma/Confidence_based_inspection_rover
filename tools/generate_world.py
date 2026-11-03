@@ -215,10 +215,10 @@ BASE_WORLD_HEADER = """<?xml version="1.0" ?>
       </link>
     </model>
 
-    <!-- Movable Box (Dynamic Obstacle test) -->
+    <!-- Movable Box (Dynamic Obstacle test - placed against corridor wall, clear of doorway) -->
     <model name="movable_box">
       <static>false</static>
-      <pose>0.0 -3.0 0.25 0 0 0</pose>
+      <pose>-0.8 -3.4 0.25 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>5.0</mass>
