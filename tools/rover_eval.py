@@ -82,7 +82,9 @@ def evaluate_at_radius(detections, gt_defects, distractors, R):
     for d_idx, det in enumerate(detections):
         for g_idx, gt in enumerate(gt_defects):
             gt_type = gt.get('type', '').strip().lower()
-            if det['defect_type'] == gt_type:
+            det_type = det['defect_type'].strip().lower()
+            type_match = (det_type == gt_type) or (gt_type == 'aruco' and det_type.startswith('aruco'))
+            if type_match:
                 gx, gy = gt['position'][0], gt['position'][1]
                 dist = math.hypot(det['x'] - gx, det['y'] - gy)
                 if dist <= R:

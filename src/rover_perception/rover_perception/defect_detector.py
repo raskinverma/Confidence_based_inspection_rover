@@ -155,7 +155,15 @@ class DefectDetector(Node):
                 x, y, w, h = cv2.boundingRect(cnt)
                 u = int(x + w / 2)
                 v = int(y + h / 2)
-                confidence = min(1.0, area / 20000.0 + 0.5)
+                # Bounding-box and contour detector quality score in [0.40, 0.85]
+                hull = cv2.convexHull(cnt)
+                hull_area = cv2.contourArea(hull)
+                solidity = float(area / hull_area) if hull_area > 0 else 0.5
+                aspect_ratio = float(min(w, h)) / float(max(w, h)) if max(w, h) > 0 else 0.5
+                area_factor = min(1.0, area / 8000.0)
+
+                confidence = 0.40 + 0.20 * area_factor + 0.15 * solidity + 0.10 * aspect_ratio
+                confidence = float(max(0.40, min(0.85, confidence)))
 
                 cv2.rectangle(debug_image, (x, y), (x + w, y + h), color_bgr, 2)
                 cv2.circle(debug_image, (u, v), 4, color_bgr, -1)

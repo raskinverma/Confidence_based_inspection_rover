@@ -1,51 +1,58 @@
 #!/usr/bin/env python3
 """
-Defect Logger Node for Inspection Rover
+Defect Logger Node for Inspection Rover (Phase 2)
 Functions:
   1. Subscribes to /defect_events
-  2. Spatial deduplication (< 0.35 m radius per defect class)
-  3. Logs unique defects to CSV file
-  4. Publishes /defects (visualization_msgs/MarkerArray) for persistent RViz rendering
-
-Fix (2026-10-27): output directory is now a ROS parameter 'output_dir' instead of
-  a hardcoded ~/College/... path. Default is a 'results/' folder relative to the
-  current working directory. The directory is created automatically if missing.
+  2. Updates Probabilistic Multi-View DefectMap with outlier-robust fusion
+  3. Periodically exports verified non-spurious defects to inspection_defects.csv
+  4. Publishes /inspection/hypotheses (std_msgs/String JSON) at 2 Hz for active planner
+  5. Publishes /inspection/markers and /defects (visualization_msgs/MarkerArray) for RViz2
 """
 
 import os
 import csv
 import math
+import json
 from datetime import datetime
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import String
 from rover_interfaces.msg import Defect
+from rover_perception.defect_map import DefectMap
 
 
 class DefectLogger(Node):
     def __init__(self):
         super().__init__('defect_logger')
 
-        # --- Output directory (ROS parameter, not hardcoded path) ---
+        # --- Output directory ---
         self.declare_parameter('output_dir', 'results')
         output_dir = self.get_parameter('output_dir').get_parameter_value().string_value
-
-        # Expand ~ and make the directory if it doesn't exist
         output_dir = os.path.expanduser(output_dir)
         if not os.path.isabs(output_dir):
-            # relative path: anchor to cwd at launch time
             output_dir = os.path.join(os.getcwd(), output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
         self.csv_file = os.path.join(output_dir, 'inspection_defects.csv')
-        self.init_csv()
 
-        # In-memory database of registered defects
-        # Each item: {'id': int, 'type': str, 'x': float, 'y': float, 'z': float,
-        #              'conf': float, 'count': int, 'frame_id': str}
-        self.registered_defects = []
-        self.spatial_threshold = 0.35  # metres
+        self.declare_parameter('spatial_threshold', 1.10)
+        self.declare_parameter('merge_radius', 0.90)
+        spatial_thresh = float(self.get_parameter('spatial_threshold').value)
+        merge_rad = float(self.get_parameter('merge_radius').value)
+
+        # Probabilistic Defect Map manager
+        self.defect_map = DefectMap(
+            association_radius=spatial_thresh,
+            merge_radius=merge_rad,
+            confirmation_confidence=0.75,
+            confirmation_min_obs=4
+        )
+
+        # Ensure empty CSV is initialized
+        self.flush_csv()
 
         # Subscriptions
         self.sub_event = self.create_subscription(
@@ -55,157 +62,108 @@ class DefectLogger(Node):
             10
         )
 
-        # Publisher for RViz visualization
+        # Publishers
         self.pub_markers = self.create_publisher(
             MarkerArray,
             '/defects',
             10
         )
+        self.pub_inspection_markers = self.create_publisher(
+            MarkerArray,
+            '/inspection/markers',
+            10
+        )
+        self.pub_hypotheses = self.create_publisher(
+            String,
+            '/inspection/hypotheses',
+            10
+        )
 
-        # Periodic timer to republish persistent markers (every 1.0 s)
-        self.timer = self.create_timer(1.0, self.publish_markers)
+        # Periodic timer for RViz markers and active planner hypotheses (2 Hz)
+        self.timer = self.create_timer(0.5, self.timer_cb)
 
-        self.get_logger().info(f'DefectLogger initialized. Logging to: {self.csv_file}')
+        self.get_logger().info(f'DefectLogger initialized with Probabilistic DefectMap. Logging to: {self.csv_file}')
 
-    def init_csv(self):
-        with open(self.csv_file, mode='w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                'id',
-                'timestamp',
-                'defect_type',
-                'map_x',
-                'map_y',
-                'map_z',
-                'confidence',
-                'pixel_u',
-                'pixel_v'
-            ])
+    @property
+    def registered_defects(self):
+        """Provides backward compatibility for code inspecting logger.registered_defects."""
+        return [h.to_dict() for h in self.defect_map.get_confirmed_hypotheses()]
 
-    def defect_event_cb(self, msg: Defect):
-        x = msg.map_position.x
-        y = msg.map_position.y
-        z = msg.map_position.z
+    def flush_csv(self):
+        try:
+            self.defect_map.export_csv(self.csv_file)
+        except Exception as e:
+            self.get_logger().error(f"Failed to flush defects CSV: {e}")
 
-        # Check for proximity match (deduplicate by type + location)
-        matched = False
-        for d in self.registered_defects:
-            dist = math.hypot(d['x'] - x, d['y'] - y)
-            if dist < self.spatial_threshold and d['type'] == msg.defect_type:
-                # Update moving average position and max confidence
-                d['count'] += 1
-                d['conf'] = max(d['conf'], msg.confidence)
-                d['x'] = 0.8 * d['x'] + 0.2 * x
-                d['y'] = 0.8 * d['y'] + 0.2 * y
-                matched = True
-                break
+    def timer_cb(self):
+        # 1. Publish hypotheses JSON for active planner
+        try:
+            json_str = self.defect_map.to_json()
+            msg = String()
+            msg.data = json_str
+            self.pub_hypotheses.publish(msg)
+        except Exception as e:
+            self.get_logger().error(f"Error publishing hypotheses: {e}")
 
-        if not matched:
-            new_id = len(self.registered_defects) + 1
-            record = {
-                'id': new_id,
-                'type': msg.defect_type,
-                'x': x,
-                'y': y,
-                'z': z,
-                'conf': msg.confidence,
-                'count': 1,
-                'frame_id': msg.header.frame_id or 'map'
-            }
-            self.registered_defects.append(record)
-
-            # Write to CSV
-            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-            with open(self.csv_file, mode='a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    new_id,
-                    now_str,
-                    msg.defect_type,
-                    f'{x:.3f}',
-                    f'{y:.3f}',
-                    f'{z:.3f}',
-                    f'{msg.confidence:.2f}',
-                    msg.pixel_u,
-                    msg.pixel_v
-                ])
-
-            self.get_logger().info(
-                f"NEW DEFECT LOGGED #{new_id}: {msg.defect_type} at ({x:.2f}, {y:.2f}) "
-                f"[conf={msg.confidence:.2f}] -> {self.csv_file}"
-            )
-
-            # Immediately update RViz markers
-            self.publish_markers()
+        # 2. Publish markers for RViz2
+        self.publish_markers()
 
     def publish_markers(self):
-        if not self.registered_defects:
-            return
+        try:
+            stamp = self.get_clock().now().to_msg()
+            marker_array = self.defect_map.to_markers(frame_id='map', stamp=stamp)
+            self.pub_inspection_markers.publish(marker_array)
+            self.pub_markers.publish(marker_array)
+        except Exception as e:
+            self.get_logger().error(f"Error publishing markers: {e}")
 
-        marker_array = MarkerArray()
+    def defect_event_cb(self, msg: Defect):
+        p_obs = np.array([msg.map_position.x, msg.map_position.y, msg.map_position.z], dtype=float)
+        p_cam = np.array([msg.camera_position.x, msg.camera_position.y, msg.camera_position.z], dtype=float)
 
-        for d in self.registered_defects:
-            # 1. Sphere marker
-            marker = Marker()
-            marker.header.frame_id = d['frame_id']
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = 'defect_spheres'
-            marker.id = d['id']
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
+        d = float(msg.observation_distance)
+        if d <= 0.0:
+            d = float(np.linalg.norm(p_obs - p_cam)) if np.linalg.norm(p_cam) > 0.0 else 1.5
 
-            marker.pose.position.x = d['x']
-            marker.pose.position.y = d['y']
-            marker.pose.position.z = max(0.15, d['z'])
-            marker.pose.orientation.w = 1.0
+        q_det = float(msg.quality)
+        if q_det <= 0.0:
+            q_det = float(np.clip(msg.confidence, 0.40, 1.0))
 
-            marker.scale.x = 0.25
-            marker.scale.y = 0.25
-            marker.scale.z = 0.25
+        w_obs = float(msg.weight)
+        if w_obs <= 0.0:
+            w_dist = 1.0 / (0.15 + max(0.1, d) ** 2)
+            w_obs = w_dist * 0.7 * q_det
 
-            # Colour by defect type
-            if 'rust' in d['type']:
-                marker.color.r = 1.0
-                marker.color.g = 0.1
-                marker.color.b = 0.1
-                marker.color.a = 0.9
-            elif 'leak' in d['type']:
-                marker.color.r = 1.0
-                marker.color.g = 0.9
-                marker.color.b = 0.0
-                marker.color.a = 0.9
-            else:  # ArUco
-                marker.color.r = 0.1
-                marker.color.g = 0.5
-                marker.color.b = 1.0
-                marker.color.a = 0.9
+        w_dist = 1.0 / (0.15 + max(0.1, d) ** 2)
+        alpha_view = float(np.clip(w_obs / (w_dist * max(0.1, q_det)), 0.2, 1.0))
 
-            marker_array.markers.append(marker)
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        frame_id = msg.header.frame_id or 'map'
 
-            # 2. Text label marker above the sphere
-            text_marker = Marker()
-            text_marker.header.frame_id = d['frame_id']
-            text_marker.header.stamp = self.get_clock().now().to_msg()
-            text_marker.ns = 'defect_labels'
-            text_marker.id = d['id'] + 1000
-            text_marker.type = Marker.TEXT_VIEW_FACING
-            text_marker.action = Marker.ADD
+        target_hyp = self.defect_map.add_observation(
+            p_obs=p_obs,
+            defect_type=msg.defect_type,
+            w_obs=w_obs,
+            d=d,
+            alpha_view=alpha_view,
+            q_det=q_det,
+            p_cam=p_cam,
+            timestamp=now_str,
+            pixel_u=msg.pixel_u,
+            pixel_v=msg.pixel_v,
+            frame_id=frame_id
+        )
 
-            text_marker.pose.position.x = d['x']
-            text_marker.pose.position.y = d['y']
-            text_marker.pose.position.z = max(0.15, d['z']) + 0.25
-            text_marker.pose.orientation.w = 1.0
+        self.get_logger().info(
+            f"OBSERVED DEFECT: {target_hyp.defect_type} (Hyp ID #{target_hyp.id}) at "
+            f"({target_hyp.pos[0]:.2f}, {target_hyp.pos[1]:.2f}, {target_hyp.pos[2]:.2f}) "
+            f"[conf={target_hyp.confidence:.2f}, obs_count={target_hyp.obs_count}, "
+            f"status={target_hyp.status}, sigma={target_hyp.sigma_pos:.2f}m]"
+        )
 
-            text_marker.scale.z = 0.12  # text height
-            text_marker.text = f"{d['type']} ({d['conf']:.2f})"
-            text_marker.color.r = 1.0
-            text_marker.color.g = 1.0
-            text_marker.color.b = 1.0
-            text_marker.color.a = 1.0
-
-            marker_array.markers.append(text_marker)
-
-        self.pub_markers.publish(marker_array)
+        # Flush updated consolidated CSV
+        self.flush_csv()
+        self.publish_markers()
 
 
 def main(args=None):
@@ -216,6 +174,7 @@ def main(args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        node.flush_csv()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

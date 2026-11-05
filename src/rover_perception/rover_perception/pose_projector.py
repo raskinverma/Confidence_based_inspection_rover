@@ -90,27 +90,20 @@ class PoseProjector(Node):
     def map_cb(self, msg: OccupancyGrid):
         self.latest_map = msg
 
-    def get_depth_for_pixel(self, u: int, v: int, fx: float, cx: float):
+    def get_lidar_range_for_bearing(self, bearing: float):
         """
-        Estimates depth Z using LiDAR scan correlation.
-        Returns float depth Z in meters, or None if invalid range (inf, NaN, out of range).
+        Looks up 2D LiDAR range along angle_lidar = -bearing.
+        Returns float distance in meters, or None if unavailable/invalid.
         """
         if self.latest_scan is None:
             return None
 
-        # Optical frame: angle around vertical axis is approximately:
-        # tan(theta) = (u - cx) / fx
-        bearing = math.atan2(float(u - cx), fx)
-
-        # In robot body coordinates, camera faces forward (+x), angles are roughly -pi to +pi
-        # Look up ray in scan around -bearing (since in optical frame x is right, while in lidar +angle is left)
         scan = self.latest_scan
         angle_lidar = -bearing
         if not (scan.angle_min <= angle_lidar <= scan.angle_max):
             return None
 
         idx = int((angle_lidar - scan.angle_min) / scan.angle_increment)
-        # Sample a narrow window of 3 rays to eliminate noise / zero readings
         samples = []
         for delta in (-1, 0, 1):
             i = idx + delta
@@ -126,10 +119,49 @@ class PoseProjector(Node):
         if math.isnan(median_r) or math.isinf(median_r) or median_r <= scan.range_min or median_r >= scan.range_max:
             return None
 
-        depth_z = median_r * math.cos(bearing)
-        if depth_z < 0.2:
-            return None
-        return depth_z
+        return median_r
+
+    def compute_wall_incidence(self, bearing: float, r_ray: np.ndarray) -> float:
+        """
+        Estimates local wall normal from adjacent LiDAR scan beams (+/-3 beams)
+        and computes incidence cosine in [0.2, 1.0].
+        """
+        if self.latest_scan is None:
+            return 0.7
+
+        scan = self.latest_scan
+        angle_lidar = -bearing
+        if not (scan.angle_min <= angle_lidar <= scan.angle_max):
+            return 0.7
+
+        idx = int((angle_lidar - scan.angle_min) / scan.angle_increment)
+        i1 = max(0, idx - 3)
+        i2 = min(len(scan.ranges) - 1, idx + 3)
+        if i1 == i2:
+            return 0.7
+
+        r1 = scan.ranges[i1]
+        r2 = scan.ranges[i2]
+        if math.isnan(r1) or math.isinf(r1) or math.isnan(r2) or math.isinf(r2):
+            return 0.7
+        if not (scan.range_min < r1 < scan.range_max and scan.range_min < r2 < scan.range_max):
+            return 0.7
+
+        th1 = scan.angle_min + i1 * scan.angle_increment
+        th2 = scan.angle_min + i2 * scan.angle_increment
+        p1 = np.array([r1 * math.cos(th1), r1 * math.sin(th1)])
+        p2 = np.array([r2 * math.cos(th2), r2 * math.sin(th2)])
+        tangent = p2 - p1
+        tan_len = np.linalg.norm(tangent)
+        if tan_len < 0.04 or tan_len > 1.2:
+            return 0.7
+
+        # 2D normal perpendicular to wall tangent
+        normal = np.array([-tangent[1], tangent[0]]) / tan_len
+        r_mid = np.array([math.cos(angle_lidar), math.sin(angle_lidar)])
+        cos_inc = abs(float(np.dot(r_mid, normal)))
+        r_xy = math.hypot(r_ray[0], r_ray[1])
+        return float(np.clip(cos_inc * r_xy, 0.2, 1.0))
 
     def defect_cb(self, msg: Defect):
         if self.camera_info is None:
@@ -151,30 +183,30 @@ class PoseProjector(Node):
         u = msg.pixel_u
         v = msg.pixel_v
 
-        # Estimate depth Z (reject observations with invalid LiDAR range)
-        Z = self.get_depth_for_pixel(u, v, fx, cx)
-        if Z is None:
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (invalid LiDAR range): "
-                f"{msg.defect_type} at pixel ({u},{v})"
-            )
-            return
+        # 1. Optical frame ray vector for pixel (u, v)
+        dx = float(u - cx) / fx
+        dy = float(v - cy) / fy
+        dz = 1.0
+        norm_opt = math.sqrt(dx * dx + dy * dy + dz * dz)
+        dir_opt = [dx / norm_opt, dy / norm_opt, dz / norm_opt]
 
-        X = (u - cx) * Z / fx
-        Y = (v - cy) * Z / fy
+        # Points in camera_optical_frame: origin (camera center) and step along ray
+        pt_origin = PointStamped()
+        pt_origin.header.stamp = rclpy.time.Time().to_msg()
+        pt_origin.header.frame_id = 'camera_optical_frame'
+        pt_origin.point.x = 0.0
+        pt_origin.point.y = 0.0
+        pt_origin.point.z = 0.0
 
-        # Create PointStamped in camera_optical_frame.
-        pt_cam = PointStamped()
-        pt_cam.header.stamp = rclpy.time.Time().to_msg()   # Time(0) = latest transform
-        pt_cam.header.frame_id = 'camera_optical_frame'
-        pt_cam.point.x = X
-        pt_cam.point.y = Y
-        pt_cam.point.z = Z
+        pt_ray = PointStamped()
+        pt_ray.header.stamp = rclpy.time.Time().to_msg()
+        pt_ray.header.frame_id = 'camera_optical_frame'
+        pt_ray.point.x = dir_opt[0]
+        pt_ray.point.y = dir_opt[1]
+        pt_ray.point.z = dir_opt[2]
 
-        # Attempt transform to target_frame (map)
         if not self.tf_buffer.can_transform(
-            self.target_frame, pt_cam.header.frame_id,
+            self.target_frame, 'camera_optical_frame',
             rclpy.time.Time(),
             timeout=rclpy.duration.Duration(seconds=0.05)
         ):
@@ -186,8 +218,11 @@ class PoseProjector(Node):
             return
 
         try:
-            pt_transformed = self.tf_buffer.transform(
-                pt_cam, self.target_frame, timeout=rclpy.duration.Duration(seconds=0.1)
+            tf_origin = self.tf_buffer.transform(
+                pt_origin, self.target_frame, timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            tf_ray = self.tf_buffer.transform(
+                pt_ray, self.target_frame, timeout=rclpy.duration.Duration(seconds=0.1)
             )
         except Exception as e:
             self.rejected_count += 1
@@ -196,7 +231,85 @@ class PoseProjector(Node):
             )
             return
 
-        # Occupancy grid check: reject if outside occupancy-grid bounds or in unknown space
+        p_cam = np.array([tf_origin.point.x, tf_origin.point.y, tf_origin.point.z], dtype=float)
+        p_ray_pt = np.array([tf_ray.point.x, tf_ray.point.y, tf_ray.point.z], dtype=float)
+        ray_vec = p_ray_pt - p_cam
+        norm_ray = np.linalg.norm(ray_vec)
+        if norm_ray < 1e-6:
+            self.rejected_count += 1
+            self.get_logger().info(
+                f"Rejected observation #{self.rejected_count} (Degenerate ray vector): "
+                f"{msg.defect_type} at ({u},{v})"
+            )
+            return
+        r_ray = ray_vec / norm_ray
+
+        # 2. Lookup LiDAR range along azimuth
+        bearing = math.atan2(float(u - cx), fx)
+        d_lidar = self.get_lidar_range_for_bearing(bearing)
+
+        # 3. Floor intersection check vs. Wall hit
+        is_floor = False
+        t_hit = None
+
+        if r_ray[2] < -0.03:
+            z_floor = 0.02
+            t_floor = (z_floor - p_cam[2]) / r_ray[2]
+            if 0.25 <= t_floor <= 3.5:
+                if d_lidar is None or t_floor < (d_lidar - 0.15):
+                    is_floor = True
+                    t_hit = t_floor
+
+        if is_floor:
+            p_hit = p_cam + t_hit * r_ray
+            obs_dist = t_hit
+        else:
+            if d_lidar is None:
+                self.rejected_count += 1
+                self.get_logger().info(
+                    f"Rejected observation #{self.rejected_count} (invalid LiDAR range for wall): "
+                    f"{msg.defect_type} at ({u},{v})"
+                )
+                return
+
+            r_xy = math.hypot(r_ray[0], r_ray[1])
+            if r_xy < 1e-4:
+                self.rejected_count += 1
+                self.get_logger().info(
+                    f"Rejected observation #{self.rejected_count} (vertical camera ray): "
+                    f"{msg.defect_type} at ({u},{v})"
+                )
+                return
+
+            t_wall = d_lidar / r_xy
+            p_hit = p_cam + t_wall * r_ray
+            obs_dist = float(np.linalg.norm(p_hit - p_cam))
+
+        # 4. Enforce strict Z-bounds, observation distance, and map bounds
+        if obs_dist < 0.20 or obs_dist > 3.5:
+            self.rejected_count += 1
+            self.get_logger().info(
+                f"Rejected observation #{self.rejected_count} (observation distance {obs_dist:.2f}m outside [0.20, 3.50]m): "
+                f"{msg.defect_type} at ({u},{v})"
+            )
+            return
+
+        if p_hit[2] < -0.05 or p_hit[2] > 1.20:
+            self.rejected_count += 1
+            self.get_logger().info(
+                f"Rejected observation #{self.rejected_count} (z={p_hit[2]:.2f} out of bounds [-0.05, 1.20]): "
+                f"{msg.defect_type} at ({u},{v})"
+            )
+            return
+
+        if p_hit[0] < -5.1 or p_hit[0] > 5.1 or p_hit[1] < -5.1 or p_hit[1] > 5.1:
+            self.rejected_count += 1
+            self.get_logger().info(
+                f"Rejected observation #{self.rejected_count} (xy=({p_hit[0]:.2f}, {p_hit[1]:.2f}) outside [-5.1, 5.1]): "
+                f"{msg.defect_type} at ({u},{v})"
+            )
+            return
+
         if self.latest_map is None:
             self.rejected_count += 1
             self.get_logger().info(
@@ -207,14 +320,14 @@ class PoseProjector(Node):
 
         info = self.latest_map.info
         res = info.resolution
-        col = int((pt_transformed.point.x - info.origin.position.x) / res)
-        row = int((pt_transformed.point.y - info.origin.position.y) / res)
+        col = int((p_hit[0] - info.origin.position.x) / res)
+        row = int((p_hit[1] - info.origin.position.y) / res)
 
         if col < 0 or col >= info.width or row < 0 or row >= info.height:
             self.rejected_count += 1
             self.get_logger().info(
                 f"Rejected observation #{self.rejected_count} (outside map bounds): "
-                f"{msg.defect_type} at ({pt_transformed.point.x:.2f}, {pt_transformed.point.y:.2f}) [col={col}, row={row}]"
+                f"{msg.defect_type} at ({p_hit[0]:.2f}, {p_hit[1]:.2f}) [col={col}, row={row}]"
             )
             return
 
@@ -224,23 +337,42 @@ class PoseProjector(Node):
             self.rejected_count += 1
             self.get_logger().info(
                 f"Rejected observation #{self.rejected_count} (in unknown space): "
-                f"{msg.defect_type} at ({pt_transformed.point.x:.2f}, {pt_transformed.point.y:.2f}) [val=-1]"
+                f"{msg.defect_type} at ({p_hit[0]:.2f}, {p_hit[1]:.2f}) [val=-1]"
             )
             return
+
+        # Compute Task 1 observation quality factors & spatial fusion weight
+        d = float(np.clip(obs_dist, 0.25, 3.50))
+        if is_floor:
+            alpha_view = float(np.clip(abs(r_ray[2]), 0.2, 1.0))
+        else:
+            alpha_view = self.compute_wall_incidence(bearing, r_ray)
+
+        w_dist = 1.0 / (0.15 + d * d)
+        q_det = float(np.clip(msg.confidence, 0.40, 1.0))
+        w_obs = float(w_dist * alpha_view * q_det)
 
         event = Defect()
         event.header = msg.header
         event.header.frame_id = self.target_frame
         event.defect_type = msg.defect_type
-        event.confidence = msg.confidence
+        event.confidence = q_det
         event.pixel_u = msg.pixel_u
         event.pixel_v = msg.pixel_v
-        event.map_position = pt_transformed.point
+        event.map_position.x = float(p_hit[0])
+        event.map_position.y = float(p_hit[1])
+        event.map_position.z = float(p_hit[2])
+        event.weight = w_obs
+        event.observation_distance = d
+        event.quality = q_det
+        event.camera_position.x = float(p_cam[0])
+        event.camera_position.y = float(p_cam[1])
+        event.camera_position.z = float(p_cam[2])
 
         self.pub_defect_event.publish(event)
         self.get_logger().info(
-            f"Projected {msg.defect_type} ({u},{v}) -> [{self.target_frame}] "
-            f"({pt_transformed.point.x:.2f}, {pt_transformed.point.y:.2f}, {pt_transformed.point.z:.2f})"
+            f"Projected {msg.defect_type} ({u},{v}) [mode={'floor' if is_floor else 'wall'}, d={d:.2f}m, w={w_obs:.3f}, alpha={alpha_view:.2f}, q={q_det:.2f}] -> [{self.target_frame}] "
+            f"({p_hit[0]:.2f}, {p_hit[1]:.2f}, {p_hit[2]:.2f})"
         )
 
 

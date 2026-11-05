@@ -20,6 +20,9 @@ Tracks Telemetry:
 import os
 import math
 import time
+import re
+import subprocess
+import threading
 import yaml
 import numpy as np
 import rclpy
@@ -60,6 +63,7 @@ class MissionManager(Node):
         self.declare_parameter('initial_x', -2.0)
         self.declare_parameter('initial_y', -1.0)
         self.declare_parameter('initial_yaw', 0.0)
+        self.declare_parameter('world_name', '')
 
         wp_file = self.get_parameter('waypoints_file').get_parameter_value().string_value
         out_dir = self.get_parameter('output_dir').get_parameter_value().string_value
@@ -93,6 +97,11 @@ class MissionManager(Node):
         self.loc_errors = []
         self.max_loc_err = 0.0
         self._last_telemetry_save = 0.0
+        self.running = True
+
+        # Thread to stream Gazebo dynamic pose ground truth
+        self.gz_thread = threading.Thread(target=self.stream_gz_poses, daemon=True)
+        self.gz_thread.start()
 
         # Publishers
         latched_qos = QoSProfile(
@@ -175,13 +184,81 @@ class MissionManager(Node):
                 self.latest_amcl_pos[0] - self.latest_gz_pos[0],
                 self.latest_amcl_pos[1] - self.latest_gz_pos[1]
             )
-            if self.initial_loc_err is None and self.state in (MissionState.LOCALIZING, MissionState.NAVIGATING):
+            if self.initial_loc_err is None:
                 self.initial_loc_err = err
-                self.get_logger().info(f"Initial localization error: {err:.4f} m (AMCL vs Gazebo GT)")
+                self.get_logger().info(
+                    f"Initial localization error: {err:.4f} m (AMCL={self.latest_amcl_pos}, GT={self.latest_gz_pos})"
+                )
             if self.state in (MissionState.LOCALIZING, MissionState.NAVIGATING, MissionState.SCANNING, MissionState.NEXT_WP):
                 self.loc_errors.append(err)
                 if err > self.max_loc_err:
                     self.max_loc_err = err
+
+    def stream_gz_poses(self):
+        # Determine candidate dynamic_pose topics
+        world_arg = self.get_parameter('world_name').get_parameter_value().string_value
+        candidate_topics = []
+        if world_arg:
+            world_base = os.path.basename(world_arg).replace('.sdf', '')
+            candidate_topics.append(f"/world/{world_base}/dynamic_pose/info")
+        candidate_topics.extend([
+            "/world/run_clean_seed1/dynamic_pose/info",
+            "/world/run_clean_seed2/dynamic_pose/info",
+            "/world/run_clean_seed3/dynamic_pose/info",
+            "/world/inspection_facility/dynamic_pose/info",
+            "/world/default/dynamic_pose/info"
+        ])
+
+        topic = candidate_topics[0] if candidate_topics else None
+        time.sleep(2.0)
+
+        # Confirm or discover topic if needed
+        for attempt in range(10):
+            if not self.running:
+                return
+            try:
+                res = subprocess.run(['gz', 'topic', '-l'], capture_output=True, text=True, timeout=5.0)
+                for line in res.stdout.splitlines():
+                    if '/dynamic_pose/info' in line:
+                        topic = line.strip()
+                        break
+            except Exception:
+                pass
+            if topic:
+                break
+            time.sleep(1.0)
+
+        if not topic:
+            self.get_logger().warn("Could not find dynamic_pose/info topic in Gazebo")
+            return
+
+        self.get_logger().info(f"Streaming ground truth rover poses from Gazebo topic: {topic}")
+        cmd = ['gz', 'topic', '-e', '-t', topic]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+        buf = ''
+        while self.running and proc.poll() is None:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            buf += line
+            if len(buf) > 10000:
+                buf = buf[-5000:]
+            if 'name: "rover"' in buf or 'name: "inspection_rover"' in buf:
+                m = re.search(r'name: "(?:rover|inspection_rover)".*?position \{\s*x:\s*([^\s]+)\s*y:\s*([^\s]+)', buf, re.DOTALL)
+                if m:
+                    try:
+                        gx = float(m.group(1))
+                        gy = float(m.group(2))
+                        self.latest_gz_pos = (gx, gy)
+                        self.compute_localization_error()
+                        buf = buf[m.end():]
+                    except ValueError:
+                        pass
+        try:
+            proc.terminate()
+        except Exception:
+            pass
 
     def publish_initial_pose(self):
         msg = PoseWithCovarianceStamped()
@@ -248,7 +325,8 @@ class MissionManager(Node):
 
         # Periodically flush telemetry every 2 seconds during active mission
         if self.mission_start_time is not None and (now_sec - self._last_telemetry_save >= 2.0):
-            self.save_telemetry(self.state)
+            st = "DONE" if self.state == MissionState.COMPLETED else self.state
+            self.save_telemetry(st)
             self._last_telemetry_save = now_sec
 
         if self.state == MissionState.IDLE:
@@ -314,9 +392,9 @@ class MissionManager(Node):
             duration = float(wp.get('scan_duration', 8.0))
 
             if elapsed < duration:
-                # Rotate smoothly in place at 0.8 rad/s (approx 360 deg in 8s)
+                # Rotate smoothly in place at 0.9 rad/s (approx 386 deg in 7.5s)
                 cmd = Twist()
-                cmd.angular.z = 0.8
+                cmd.angular.z = 0.9
                 self.pub_cmd_vel.publish(cmd)
             else:
                 # Stop rotation
@@ -421,8 +499,10 @@ class MissionManager(Node):
             self.transition_to(MissionState.NEXT_WP)
 
     def destroy_node(self):
+        self.running = False
         try:
-            self.save_telemetry(self.state)
+            st = "DONE" if self.state == MissionState.COMPLETED else self.state
+            self.save_telemetry(st)
         except Exception:
             pass
         super().destroy_node()

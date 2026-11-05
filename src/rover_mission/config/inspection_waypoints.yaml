@@ -24,46 +24,46 @@ waypoints:
     x: -2.0
     y: -1.5
     yaw: 0.0
-    scan_duration: 8.0
+    scan_duration: 7.5
 
   - id: 2
     name: "Corridor_Entrance_Inspection"
     x: 0.8
     y: -3.0
     yaw: 0.0
-    scan_duration: 8.0
+    scan_duration: 7.5
 
   - id: 3
     name: "Room_A_North_Inspection"
     x: -2.0
     y: 2.0
     yaw: 1.5708
-    scan_duration: 8.0
+    scan_duration: 7.5
 
   - id: 4
-    name: "Room_B_Entrance_Inspection"
-    x: 1.0
-    y: 0.5
-    yaw: 0.0
-    scan_duration: 8.0
-
-  - id: 5
     name: "Room_B_North_Pipes_Inspection"
     x: 2.2
     y: 2.2
     yaw: 1.5708
-    scan_duration: 8.0
+    scan_duration: 7.5
 
-  - id: 6
+  - id: 5
     name: "Room_B_East_Inspection"
     x: 3.2
     y: 1.8
     yaw: 0.0
-    scan_duration: 8.0
+    scan_duration: 7.5
+
+  - id: 6
+    name: "Room_B_South_Inspection"
+    x: 2.0
+    y: -1.0
+    yaw: 0.0
+    scan_duration: 7.5
 
   - id: 7
     name: "Return_Home"
     x: -2.0
     y: -1.0
     yaw: 0.0
-    scan_duration: 2.0
+    scan_duration: 1.0

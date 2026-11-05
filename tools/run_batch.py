@@ -224,8 +224,9 @@ def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str,
                 try:
                     with open(telemetry_yaml, 'r') as tf:
                         tel_data = yaml.safe_load(tf) or {}
-                        if tel_data.get('status') in ('DONE', 'FAILED'):
-                            mission_status = tel_data.get('status')
+                        if tel_data.get('status') in ('DONE', 'COMPLETED', 'FAILED'):
+                            raw_st = tel_data.get('status')
+                            mission_status = 'COMPLETED' if raw_st in ('DONE', 'COMPLETED') else raw_st
                             print(f"[{run_id}] Mission completed with status: {mission_status}")
                             break
                 except Exception:
@@ -311,7 +312,7 @@ def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str,
 
 def main():
     parser = argparse.ArgumentParser(description="Batch Runner for Inspection Rover")
-    parser.add_argument('--method', default='baseline', help="Inspection method name")
+    parser.add_argument('--method', '--methods', dest='method', default='baseline', help="Inspection method name")
     parser.add_argument('--seeds', nargs='+', type=int, default=[1, 2, 3, 4, 5], help="List of seeds to run")
     parser.add_argument('--conditions', nargs='+', default=['clean', 'hard'], choices=['clean', 'hard'],
                         help="Conditions to run (clean, hard)")
