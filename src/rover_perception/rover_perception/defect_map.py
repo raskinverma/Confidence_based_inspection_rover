@@ -16,6 +16,15 @@ import numpy as np
 from visualization_msgs.msg import Marker, MarkerArray
 
 
+def normalize_angle(theta: float) -> float:
+    """Normalizes angle to [-pi, pi]."""
+    while theta > math.pi:
+        theta -= 2.0 * math.pi
+    while theta < -math.pi:
+        theta += 2.0 * math.pi
+    return theta
+
+
 def weighted_median_1d(values: np.ndarray, weights: np.ndarray) -> float:
     """Computes the weighted median of a 1D array."""
     if len(values) == 0:
@@ -68,6 +77,9 @@ class DefectHypothesis:
         # Observation history buffer (up to 150 observations)
         self.observations: List[Dict] = []
 
+        self.negative_dwell_time: float = 0.0
+        self.last_positive_obs_time: float = 0.0
+
         self.first_timestamp: str = initial_timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         self.last_timestamp: str = self.first_timestamp
         self.pixel_u: int = 0
@@ -77,6 +89,9 @@ class DefectHypothesis:
                         alpha_view: float, q_det: float, p_cam: Optional[np.ndarray] = None,
                         timestamp: str = "", pixel_u: int = 0, pixel_v: int = 0):
         """Adds a single observation to the hypothesis buffer and updates belief."""
+        import time
+        self.negative_dwell_time = 0.0
+        self.last_positive_obs_time = time.time()
         ts = timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         self.last_timestamp = ts
         self.pixel_u = pixel_u
@@ -174,15 +189,43 @@ class DefectHypothesis:
 
     def update_status(self):
         """Updates hypothesis status based on confirmation thresholds."""
+        if self.status == "REJECTED":
+            return
         is_aruco = self.defect_type.lower().startswith('aruco')
-        min_obs = 3 if is_aruco else 5
+        has_close = any(o['dist'] <= 3.2 for o in self.observations)
+        num_angles = len({b[0] for b in self.distinct_view_bins})
+        has_multi_angle = num_angles >= 2
 
-        if self.confidence >= 0.75 and self.obs_count >= min_obs:
-            self.status = "CONFIRMED"
-        elif self.confidence >= 0.25 or self.obs_count >= 2:
-            self.status = "UNCERTAIN"
+        if is_aruco:
+            if self.confidence >= 0.70 and self.obs_count >= 3:
+                self.status = "CONFIRMED"
+            elif self.confidence >= 0.25 or self.obs_count >= 2:
+                self.status = "UNCERTAIN"
+            else:
+                self.status = "CANDIDATE"
         else:
-            self.status = "CANDIDATE"
+            # Color defects (leak, rust):
+            confirmed = False
+            is_floor = abs(self.pos[2] - 0.02) < 0.05
+            if is_floor:
+                # Floor puddles: high confidence at floor plane
+                if has_multi_angle and self.confidence >= 0.75 and self.obs_count >= 10 and has_close:
+                    confirmed = True
+                elif self.confidence >= 0.78 and self.obs_count >= 15 and has_close:
+                    confirmed = True
+            else:
+                # Wall defects:
+                if has_multi_angle and self.confidence >= 0.75 and self.obs_count >= 12 and has_close:
+                    confirmed = True
+                elif self.confidence >= 0.78 and self.obs_count >= 20 and has_close:
+                    confirmed = True
+
+            if confirmed:
+                self.status = "CONFIRMED"
+            elif self.confidence >= 0.25 or self.obs_count >= 2:
+                self.status = "UNCERTAIN"
+            else:
+                self.status = "CANDIDATE"
 
     def merge_with(self, other: 'DefectHypothesis'):
         """Merges another hypothesis into this one, combining observations and belief."""
@@ -197,9 +240,11 @@ class DefectHypothesis:
         self.first_timestamp = min(self.first_timestamp, other.first_timestamp)
         self.last_timestamp = max(self.last_timestamp, other.last_timestamp)
 
-        # Combine log-odds using Bayesian evidence pooling
+        # Combine log-odds using Bayesian evidence pooling + multi-view consensus bonus
         delta_L_other = max(0.0, other.log_odds - (-1.2))
-        self.log_odds = min(4.5, self.log_odds + delta_L_other)
+        num_angles = len({b[0] for b in self.distinct_view_bins})
+        multi_angle_bonus = 0.20 if num_angles >= 2 else 0.0
+        self.log_odds = min(4.5, self.log_odds + delta_L_other + multi_angle_bonus)
         self.confidence = float(1.0 / (1.0 + math.exp(-self.log_odds)))
 
         self.recompute_fused_position()
@@ -294,18 +339,89 @@ class DefectMap:
                 if merged:
                     break
 
-    def get_confirmed_hypotheses(self) -> List[DefectHypothesis]:
+    def check_negative_evidence(self, robot_x: float, robot_y: float, robot_yaw: float,
+                                scan=None, dt: float = 0.5):
+        """
+        Evaluates negative evidence for UNCERTAIN or CANDIDATE hypotheses
+        when the robot is within 0.5m - 1.8m and looking within ±25 deg of camera FOV.
+        If no matching detection occurs for >= 2.5s (or L <= -2.2), marks as REJECTED.
+        """
+        import time
+        now_ts = time.time()
+        fov_half = math.radians(25.0)
+
+        for h in self.hypotheses:
+            if h.status not in ("CANDIDATE", "UNCERTAIN"):
+                continue
+
+            dx = h.pos[0] - robot_x
+            dy = h.pos[1] - robot_y
+            dist = math.hypot(dx, dy)
+
+            # Close range check
+            if not (0.50 <= dist <= 1.80):
+                continue
+
+            # Viewing bearing relative to robot yaw
+            bearing = math.atan2(dy, dx)
+            signed_rel = normalize_angle(bearing - robot_yaw)
+            if abs(signed_rel) > fov_half:
+                continue
+
+            # LiDAR occlusion / 3D obstacle check
+            if scan is not None:
+                beam_idx = int((signed_rel - scan.angle_min) / scan.angle_increment)
+                if 0 <= beam_idx < len(scan.ranges):
+                    r_lidar = scan.ranges[beam_idx]
+                    if not (math.isnan(r_lidar) or math.isinf(r_lidar)) and r_lidar > 0.15:
+                        depth_diff = dist - r_lidar
+                        if 0.10 <= depth_diff <= 0.40:
+                            # 3D physical object (e.g. distractor barrel/bucket/toolbox) stands at target slot!
+                            h.negative_dwell_time = getattr(h, 'negative_dwell_time', 0.0) + dt
+                            h.log_odds = max(-4.5, h.log_odds - 0.35 * dt)
+                            h.confidence = float(1.0 / (1.0 + math.exp(-h.log_odds)))
+                            if h.negative_dwell_time >= 2.0 or h.log_odds <= -2.0:
+                                h.status = "REJECTED"
+                            continue
+                        elif depth_diff > 0.40:
+                            # Target is occluded by foreground structure (e.g. partition wall, shelf rack)
+                            # Do not penalize hypothesis since line-of-sight is blocked!
+                            continue
+
+            # Unobstructed close-range frustum dwell without positive detection
+            if now_ts - getattr(h, 'last_positive_obs_time', 0.0) >= 0.8:
+                h.negative_dwell_time = getattr(h, 'negative_dwell_time', 0.0) + dt
+                h.log_odds = max(-4.5, h.log_odds - 0.25 * dt)
+                h.confidence = float(1.0 / (1.0 + math.exp(-h.log_odds)))
+
+                if h.negative_dwell_time >= 2.5 or h.log_odds <= -2.2:
+                    h.status = "REJECTED"
+
+    def get_confirmed_hypotheses(self, strict_confirmed_only: bool = False) -> List[DefectHypothesis]:
         """Returns verified hypotheses meeting confirmation criteria."""
         confirmed = []
         for h in self.hypotheses:
+            if h.status == "REJECTED":
+                continue
             is_aruco = h.defect_type.lower().startswith('aruco')
-            if is_aruco:
-                # ArUco has high fidelity: confirmed if >= 3 detections with confidence >= 0.50
-                if h.obs_count >= 3 and h.confidence >= 0.50:
+            is_floor = abs(h.pos[2] - 0.02) < 0.05
+            if h.status == "CONFIRMED":
+                confirmed.append(h)
+            elif not strict_confirmed_only:
+                # Baseline fallback: require high confidence and observation count
+                if is_aruco and h.obs_count >= 3 and h.confidence >= 0.70:
+                    confirmed.append(h)
+                elif is_floor and h.obs_count >= 6 and h.confidence >= 0.72:
+                    confirmed.append(h)
+                elif (not is_floor) and h.obs_count >= 10 and h.confidence >= 0.75:
                     confirmed.append(h)
             else:
-                # Color defects (leak, rust): confirmed if status is CONFIRMED or obs_count >= 4 and confidence >= 0.55
-                if h.status == "CONFIRMED" or (h.obs_count >= self.confirmation_min_obs and h.confidence >= 0.55):
+                # Active fallback: export un-rejected hypotheses with solid multi-frame evidence
+                if is_aruco and h.obs_count >= 3 and h.confidence >= 0.70:
+                    confirmed.append(h)
+                elif is_floor and h.obs_count >= 15 and h.confidence >= 0.75 and getattr(h, 'sigma_pos', 1.0) <= 0.25:
+                    confirmed.append(h)
+                elif (not is_floor) and h.obs_count >= 20 and h.confidence >= 0.78 and getattr(h, 'sigma_pos', 1.0) <= 0.25:
                     confirmed.append(h)
         return confirmed
 
@@ -356,6 +472,11 @@ class DefectMap:
                 sphere.color.g = 0.55
                 sphere.color.b = 0.0
                 sphere.color.a = 0.80
+            elif h.status == "REJECTED":
+                sphere.color.r = 0.3
+                sphere.color.g = 0.3
+                sphere.color.b = 0.3
+                sphere.color.a = 0.20
             else:  # CANDIDATE
                 sphere.color.r = 0.6
                 sphere.color.g = 0.6
@@ -390,12 +511,12 @@ class DefectMap:
 
         return marker_array
 
-    def export_csv(self, file_path: str):
+    def export_csv(self, file_path: str, strict_confirmed_only: bool = False):
         """Exports confirmed non-spurious hypotheses to CSV format compatible with rover_eval."""
         os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
         temp_file = file_path + ".tmp"
 
-        confirmed_hypotheses = self.get_confirmed_hypotheses()
+        confirmed_hypotheses = self.get_confirmed_hypotheses(strict_confirmed_only=strict_confirmed_only)
 
         with open(temp_file, mode='w', newline='') as f:
             writer = csv.writer(f)

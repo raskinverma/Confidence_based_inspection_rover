@@ -35,6 +35,10 @@ CONDITIONS = {
     'hard': {
         'num_distractors': 4,
         'camera_noise': 0.02
+    },
+    'distractors': {
+        'num_distractors': 2,
+        'camera_noise': 0.007
     }
 }
 
@@ -196,7 +200,7 @@ def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str,
         f"ros2 launch rover_bringup full_sim.launch.py "
         f"mode:=nav run_perception:=true run_mission:=true "
         f"world:={sdf_path} output_dir:={run_output_dir} "
-        f"headless:=true use_rviz:=false"
+        f"headless:=true use_rviz:=false inspection_mode:={method}"
     )
 
     log_file_path = os.path.join(run_output_dir, 'sim.log')
@@ -306,6 +310,8 @@ def run_single_simulation(method: str, seed: int, condition: str, sdf_path: str,
         except Exception:
             pass
     metrics['rejected_observations'] = rejected_count
+    metrics['reinspections_performed'] = tel_data.get('reinspections_performed', 0)
+    metrics['final_coverage_ratio'] = tel_data.get('final_coverage_ratio', 0.0)
 
     return metrics
 
@@ -314,8 +320,8 @@ def main():
     parser = argparse.ArgumentParser(description="Batch Runner for Inspection Rover")
     parser.add_argument('--method', '--methods', dest='method', default='baseline', help="Inspection method name")
     parser.add_argument('--seeds', nargs='+', type=int, default=[1, 2, 3, 4, 5], help="List of seeds to run")
-    parser.add_argument('--conditions', nargs='+', default=['clean', 'hard'], choices=['clean', 'hard'],
-                        help="Conditions to run (clean, hard)")
+    parser.add_argument('--conditions', nargs='+', default=['clean', 'hard'], choices=['clean', 'hard', 'distractors'],
+                        help="Conditions to run (clean, hard, distractors)")
     parser.add_argument('--timeout', type=int, default=900, help="Per-run timeout in seconds (default: 900s)")
     parser.add_argument('--output-csv', default='results/runs.csv', help="CSV file to append results")
     parser.add_argument('--force-clean', action='store_true', help="Clean stray processes automatically at startup")

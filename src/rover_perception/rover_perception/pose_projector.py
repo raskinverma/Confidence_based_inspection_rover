@@ -115,6 +115,17 @@ class PoseProjector(Node):
         if not samples:
             return None
 
+        # Check for sharp depth discontinuity across adjacent beams (e.g. obstacle silhouette edges)
+        if len(samples) > 1 and (max(samples) - min(samples) > 0.50):
+            if 0 <= idx < len(scan.ranges):
+                r_center = scan.ranges[idx]
+                if not math.isnan(r_center) and not math.isinf(r_center) and scan.range_min < r_center < scan.range_max:
+                    if abs(r_center - min(samples)) < 0.15:
+                        return float(r_center)
+                    elif abs(r_center - max(samples)) < 0.15:
+                        return float(r_center)
+            return None
+
         median_r = float(np.median(samples))
         if math.isnan(median_r) or math.isinf(median_r) or median_r <= scan.range_min or median_r >= scan.range_max:
             return None
@@ -286,10 +297,10 @@ class PoseProjector(Node):
             obs_dist = float(np.linalg.norm(p_hit - p_cam))
 
         # 4. Enforce strict Z-bounds, observation distance, and map bounds
-        if obs_dist < 0.20 or obs_dist > 3.5:
+        if obs_dist < 0.20 or obs_dist > 3.85:
             self.rejected_count += 1
             self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (observation distance {obs_dist:.2f}m outside [0.20, 3.50]m): "
+                f"Rejected observation #{self.rejected_count} (observation distance {obs_dist:.2f}m outside [0.20, 3.85]m): "
                 f"{msg.defect_type} at ({u},{v})"
             )
             return
@@ -302,10 +313,10 @@ class PoseProjector(Node):
             )
             return
 
-        if p_hit[0] < -5.1 or p_hit[0] > 5.1 or p_hit[1] < -5.1 or p_hit[1] > 5.1:
+        if p_hit[0] < -5.15 or p_hit[0] > 5.15 or p_hit[1] < -4.15 or p_hit[1] > 4.15:
             self.rejected_count += 1
             self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (xy=({p_hit[0]:.2f}, {p_hit[1]:.2f}) outside [-5.1, 5.1]): "
+                f"Rejected observation #{self.rejected_count} (xy=({p_hit[0]:.2f}, {p_hit[1]:.2f}) outside [-5.15, 5.15] x [-4.15, 4.15]): "
                 f"{msg.defect_type} at ({u},{v})"
             )
             return

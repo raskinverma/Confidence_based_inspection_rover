@@ -20,6 +20,8 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import String
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from rover_interfaces.msg import Defect
 from rover_perception.defect_map import DefectMap
 
@@ -40,8 +42,10 @@ class DefectLogger(Node):
 
         self.declare_parameter('spatial_threshold', 1.10)
         self.declare_parameter('merge_radius', 0.90)
+        self.declare_parameter('inspection_mode', 'baseline')
         spatial_thresh = float(self.get_parameter('spatial_threshold').value)
         merge_rad = float(self.get_parameter('merge_radius').value)
+        self.inspection_mode = self.get_parameter('inspection_mode').get_parameter_value().string_value
 
         # Probabilistic Defect Map manager
         self.defect_map = DefectMap(
@@ -54,11 +58,27 @@ class DefectLogger(Node):
         # Ensure empty CSV is initialized
         self.flush_csv()
 
+        self.latest_robot_pos = None
+        self.latest_robot_yaw = 0.0
+        self.latest_scan = None
+
         # Subscriptions
         self.sub_event = self.create_subscription(
             Defect,
             '/defect_events',
             self.defect_event_cb,
+            10
+        )
+        self.sub_amcl = self.create_subscription(
+            PoseWithCovarianceStamped,
+            '/amcl_pose',
+            self.amcl_cb,
+            10
+        )
+        self.sub_scan = self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.scan_cb,
             10
         )
 
@@ -91,12 +111,32 @@ class DefectLogger(Node):
 
     def flush_csv(self):
         try:
-            self.defect_map.export_csv(self.csv_file)
+            strict = (getattr(self, 'inspection_mode', 'baseline') == 'active')
+            self.defect_map.export_csv(self.csv_file, strict_confirmed_only=strict)
         except Exception as e:
             self.get_logger().error(f"Failed to flush defects CSV: {e}")
 
+    def amcl_cb(self, msg: PoseWithCovarianceStamped):
+        p = msg.pose.pose.position
+        o = msg.pose.pose.orientation
+        self.latest_robot_pos = (p.x, p.y)
+        self.latest_robot_yaw = 2.0 * math.atan2(o.z, o.w)
+
+    def scan_cb(self, msg: LaserScan):
+        self.latest_scan = msg
+
     def timer_cb(self):
-        # 1. Publish hypotheses JSON for active planner
+        # 1. Check negative evidence for close-range dwell
+        if self.latest_robot_pos is not None:
+            self.defect_map.check_negative_evidence(
+                self.latest_robot_pos[0],
+                self.latest_robot_pos[1],
+                self.latest_robot_yaw,
+                self.latest_scan,
+                dt=0.5
+            )
+
+        # 2. Publish hypotheses JSON for active planner
         try:
             json_str = self.defect_map.to_json()
             msg = String()
@@ -105,7 +145,7 @@ class DefectLogger(Node):
         except Exception as e:
             self.get_logger().error(f"Error publishing hypotheses: {e}")
 
-        # 2. Publish markers for RViz2
+        # 3. Publish markers for RViz2
         self.publish_markers()
 
     def publish_markers(self):

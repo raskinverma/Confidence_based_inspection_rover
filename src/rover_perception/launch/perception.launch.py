@@ -13,6 +13,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     output_dir = LaunchConfiguration('output_dir')
     detector_params_file = LaunchConfiguration('detector_params_file')
+    inspection_mode = LaunchConfiguration('inspection_mode')
 
     declare_use_sim_time = DeclareLaunchArgument(
         'use_sim_time',
@@ -30,6 +31,12 @@ def generate_launch_description():
         'detector_params_file',
         default_value=default_detector_params,
         description='Full path to detector parameters YAML'
+    )
+
+    declare_inspection_mode = DeclareLaunchArgument(
+        'inspection_mode',
+        default_value='baseline',
+        description='Inspection mode: baseline or active'
     )
 
     node_detector = Node(
@@ -59,6 +66,7 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': use_sim_time,
             'output_dir': output_dir,
+            'inspection_mode': inspection_mode,
         }]
     )
 
@@ -66,6 +74,7 @@ def generate_launch_description():
         declare_use_sim_time,
         declare_output_dir,
         declare_detector_params,
+        declare_inspection_mode,
         node_detector,
         node_projector,
         node_logger

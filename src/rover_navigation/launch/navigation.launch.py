@@ -17,11 +17,19 @@ def generate_launch_description():
     autostart = LaunchConfiguration('autostart')
     use_composition = LaunchConfiguration('use_composition')
     use_rviz = LaunchConfiguration('use_rviz')
+    rviz_config = LaunchConfiguration('rviz_config')
 
     declare_use_sim_time = DeclareLaunchArgument(
         'use_sim_time',
         default_value='true',
         description='Use simulation clock if true'
+    )
+
+    default_rviz = os.path.join(pkg_rover_navigation, 'rviz', 'active_inspection_demo.rviz')
+    declare_rviz_config = DeclareLaunchArgument(
+        'rviz_config',
+        default_value=default_rviz,
+        description='Full path to RViz config file'
     )
 
     default_map = os.path.join(pkg_rover_navigation, 'maps', 'facility.yaml')
@@ -76,12 +84,14 @@ def generate_launch_description():
         launch_arguments={
             'use_sim_time': use_sim_time,
             'use_namespace': 'false',
+            'rviz_config': rviz_config,
         }.items(),
         condition=IfCondition(use_rviz)
     )
 
     return LaunchDescription([
         declare_use_sim_time,
+        declare_rviz_config,
         declare_map,
         declare_params,
         declare_autostart,

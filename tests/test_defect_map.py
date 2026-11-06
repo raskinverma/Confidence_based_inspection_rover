@@ -211,6 +211,49 @@ class TestDefectMap(unittest.TestCase):
         self.assertGreater(hyp.confidence, 0.985)
         self.assertEqual(hyp.status, "CONFIRMED")
 
+    def test_hypothesis_ghost_rejection(self):
+        """
+        Verify that a candidate hypothesis subjected to >= 2.5s of direct,
+        unobstructed close-range viewing without positive detections is marked REJECTED.
+        """
+        dmap = DefectMap(association_radius=1.10, merge_radius=0.90)
+
+        # 1. Single transient observation generates a CANDIDATE
+        target_pos = np.array([1.0, 0.0, 0.3])
+        dmap.add_observation(
+            p_obs=target_pos,
+            defect_type="rust",
+            w_obs=0.10,
+            d=3.0,
+            alpha_view=0.3,
+            q_det=0.45
+        )
+        self.assertEqual(len(dmap.hypotheses), 1)
+        hyp = dmap.hypotheses[0]
+        self.assertIn(hyp.status, ["CANDIDATE", "UNCERTAIN"])
+
+        # 2. Robot moves to (0.0, 0.0) facing East (yaw = 0.0), looking directly at (1.0, 0.0)
+        # Perform dwell checks over 3.0 seconds (6 steps of dt=0.5s)
+        # Pretend last positive observation was 2.0s ago
+        import time
+        hyp.last_positive_obs_time = time.time() - 2.0
+
+        for _ in range(6):
+            dmap.check_negative_evidence(
+                robot_x=0.0,
+                robot_y=0.0,
+                robot_yaw=0.0,
+                scan=None,
+                dt=0.5
+            )
+
+        self.assertEqual(hyp.status, "REJECTED")
+        self.assertGreaterEqual(hyp.negative_dwell_time, 2.5)
+
+        # REJECTED hypotheses must not be returned in confirmed or uncertain lists
+        self.assertEqual(len(dmap.get_confirmed_hypotheses()), 0)
+        self.assertEqual(len(dmap.get_uncertain_hypotheses()), 0)
+
 
 if __name__ == '__main__':
     unittest.main()
