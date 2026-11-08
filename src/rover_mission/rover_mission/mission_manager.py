@@ -118,6 +118,8 @@ class MissionManager(Node):
         self.current_active_goal = None
         self.active_goal_type = None  # 'REINSPECT' or 'EXPLORE'
         self.last_coverage_pub_time = 0.0
+        self.nav_goal_start_time = None
+        self._last_completed_banner_time = 0.0
 
         # Room exploration anchors for active inspection mode (navigable poses forming continuous topological sweep)
         self.room_anchors = [
@@ -525,6 +527,29 @@ class MissionManager(Node):
                 self.transition_to(MissionState.NAVIGATING)
                 self.send_current_goal()
 
+        elif self.state == MissionState.NAVIGATING:
+            if self.nav_goal_start_time is not None:
+                elapsed = (self.get_clock().now() - self.nav_goal_start_time).nanoseconds / 1e9
+                if elapsed >= 45.0:
+                    target_name = (
+                        self.current_active_goal['name']
+                        if (self.inspection_mode == 'active' and self.current_active_goal)
+                        else f"WP #{self.waypoints[self.current_wp_idx]['id']}"
+                    )
+                    self.get_logger().warn(
+                        f"⚠️ [MISSION TIMEOUT] Navigation to {target_name} exceeded 45.0s (elapsed={elapsed:.1f}s)! "
+                        f"Canceling stuck goal and advancing to next goal..."
+                    )
+                    if self.goal_handle is not None:
+                        try:
+                            self.goal_handle.cancel_goal_async()
+                        except Exception as e:
+                            self.get_logger().warn(f"Error canceling goal handle: {e}")
+                    self.pub_cmd_vel.publish(Twist())
+                    self.nav_goal_start_time = None
+                    self.retry_count = self.max_retries
+                    self.handle_nav_failure(reject=False)
+
         elif self.state == MissionState.SCANNING:
             now = self.get_clock().now()
             elapsed = (now - self.scan_start_time).nanoseconds / 1e9
@@ -619,6 +644,20 @@ class MissionManager(Node):
                         self.save_telemetry("FAILED")
                         self.get_logger().error("Mission finished with 0 successful waypoints. Status: FAILED.")
 
+        elif self.state == MissionState.COMPLETED:
+            if now_sec - self._last_completed_banner_time >= 5.0:
+                self._last_completed_banner_time = now_sec
+                confirmed_count = sum(1 for h in self.active_hypotheses if h.get('status') == 'CONFIRMED')
+                coverage_pct = (self.coverage_map.get_coverage_ratio() * 100.0) if self.coverage_map else 0.0
+                banner = (
+                    f"================================================================================\n"
+                    f"🎉 === MISSION COMPLETE: {confirmed_count}/6 Defects Confirmed, Coverage: {coverage_pct:.1f}% ===\n"
+                    f"   Path: {self.path_length:.2f}m | Clearance: {self.min_clearance:.2f}m | Status: DONE\n"
+                    f"================================================================================"
+                )
+                print("\n" + banner + "\n", flush=True)
+                self.get_logger().info(f"=== MISSION COMPLETE: {confirmed_count}/6 Defects Confirmed, Coverage: {coverage_pct:.1f}% ===")
+
     def transition_to(self, new_state):
         self.get_logger().info(f"[FSM TRANSITION] {self.state} -> {new_state}")
         self.state = new_state
@@ -628,22 +667,33 @@ class MissionManager(Node):
             self.save_telemetry("FAILED")
 
     def send_current_goal(self):
+        self.nav_goal_start_time = self.get_clock().now()
         if self.inspection_mode == 'active' and self.current_active_goal is not None:
             gx = float(self.current_active_goal['x'])
             gy = float(self.current_active_goal['y'])
             gyaw = float(self.current_active_goal['yaw'])
             gname = self.current_active_goal['name']
-            self.get_logger().info(f"Navigating to Active Goal ({gname}): ({gx:.2f}, {gy:.2f}, yaw={gyaw:.2f})")
+            gtype = self.current_active_goal.get('type', 'EXPLORE')
+            if gtype == 'REINSPECT':
+                hid = self.current_active_goal.get('hyp_id', '?')
+                banner = f"🔍 [MISSION] Re-inspecting uncertain hypothesis #{hid} ({gname}) at ({gx:.2f}, {gy:.2f})"
+            else:
+                step_idx = len(self.visited_anchors) + 1
+                total_anchors = len(self.room_anchors)
+                banner = f"🚀 [MISSION] [Anchor {step_idx}/{total_anchors}] Navigating to {gname} at ({gx:.2f}, {gy:.2f})"
+            print(f"\n{'='*80}\n{banner}\n{'='*80}\n", flush=True)
+            self.get_logger().info(banner)
         else:
             wp = self.waypoints[self.current_wp_idx]
             gx = float(wp['x'])
             gy = float(wp['y'])
             gyaw = float(wp['yaw'])
             gname = wp['name']
-            self.get_logger().info(
-                f"Navigating to WP #{wp['id']}/{len(self.waypoints)} ({gname}): "
-                f"({gx}, {gy}, yaw={gyaw})"
-            )
+            step_idx = self.current_wp_idx + 1
+            total_wps = len(self.waypoints)
+            banner = f"🚀 [MISSION] [Waypoint {step_idx}/{total_wps}] Navigating to {gname} at ({gx:.2f}, {gy:.2f})"
+            print(f"\n{'='*80}\n{banner}\n{'='*80}\n", flush=True)
+            self.get_logger().info(banner)
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
@@ -681,6 +731,7 @@ class MissionManager(Node):
         result_future.add_done_callback(self.goal_result_callback)
 
     def goal_result_callback(self, future):
+        self.nav_goal_start_time = None
         try:
             status = future.result().status
         except Exception as e:
@@ -699,6 +750,7 @@ class MissionManager(Node):
             self.handle_nav_failure(reject=False)
 
     def handle_nav_failure(self, reject: bool = False):
+        self.nav_goal_start_time = None
         if self.retry_count < self.max_retries:
             self.retry_count += 1
             self.get_logger().info(f"Retrying goal ({self.retry_count}/{self.max_retries}) after backoff...")

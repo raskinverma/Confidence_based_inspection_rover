@@ -58,6 +58,7 @@ class DefectLogger(Node):
         # Ensure empty CSV is initialized
         self.flush_csv()
 
+        self._last_logged_status = {}
         self.latest_robot_pos = None
         self.latest_robot_yaw = 0.0
         self.latest_scan = None
@@ -194,12 +195,23 @@ class DefectLogger(Node):
             frame_id=frame_id
         )
 
-        self.get_logger().info(
+        prev_status = self._last_logged_status.get(target_hyp.id, None)
+        status_changed = (prev_status != target_hyp.status)
+        is_first = (target_hyp.obs_count == 1)
+        periodic_sample = (target_hyp.obs_count % 25 == 0 and target_hyp.obs_count <= 100)
+
+        should_log = is_first or status_changed or periodic_sample
+
+        log_str = (
             f"OBSERVED DEFECT: {target_hyp.defect_type} (Hyp ID #{target_hyp.id}) at "
             f"({target_hyp.pos[0]:.2f}, {target_hyp.pos[1]:.2f}, {target_hyp.pos[2]:.2f}) "
             f"[conf={target_hyp.confidence:.2f}, obs_count={target_hyp.obs_count}, "
             f"status={target_hyp.status}, sigma={target_hyp.sigma_pos:.2f}m]"
         )
+        self.get_logger().debug(log_str)
+        if should_log:
+            self.get_logger().info(log_str)
+            self._last_logged_status[target_hyp.id] = target_hyp.status
 
         # Flush updated consolidated CSV
         self.flush_csv()

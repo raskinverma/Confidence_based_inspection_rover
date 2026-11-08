@@ -54,11 +54,24 @@ echo "==========================================================================
 
 # 1. Clean up any residual simulation processes
 echo "[1/4] Checking and cleaning residual processes..."
-pkill -9 -f "gz sim|gz-sim|ros2 launch|nav2_|bt_navigator|controller_server|planner_server|mission_manager|defect_detector|pose_projector" 2>/dev/null || true
+pkill -9 -x rviz2 2>/dev/null || true
+pkill -9 -x bt_navigator 2>/dev/null || true
+pkill -9 -x controller_server 2>/dev/null || true
+pkill -9 -x planner_server 2>/dev/null || true
+pkill -9 -x behavior_server 2>/dev/null || true
+pkill -9 -x smoother_server 2>/dev/null || true
+pkill -9 -f "gz sim" 2>/dev/null || true
+pkill -9 -f "rover_perception" 2>/dev/null || true
+pkill -9 -f "rover_mission" 2>/dev/null || true
+pkill -9 -f "ros2 launch rover_bringup" 2>/dev/null || true
 sleep 1
 
-# 2. Source ROS 2 environment
+# 2. Source ROS 2 environment & check display
 echo "[2/4] Sourcing ROS 2 Jazzy workspace..."
+export DISPLAY="${DISPLAY:-:0}"
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    export WAYLAND_DISPLAY="$WAYLAND_DISPLAY"
+fi
 source /opt/ros/jazzy/setup.bash
 if [ -f "install/setup.bash" ]; then
     source install/setup.bash
@@ -81,8 +94,8 @@ fi
 
 python3 tools/generate_world.py \
     --seed "$SEED" \
-    --distractors "$NUM_DISTRACTORS" \
-    --noise "$CAMERA_NOISE" \
+    --num-distractors "$NUM_DISTRACTORS" \
+    --camera-noise "$CAMERA_NOISE" \
     --output-sdf "src/rover_gazebo/worlds/run_${CONDITION}_seed${SEED}.sdf" \
     --output-gt "src/rover_gazebo/worlds/run_${CONDITION}_seed${SEED}_ground_truth.yaml"
 
@@ -95,7 +108,16 @@ cleanup() {
     echo ""
     echo "================================================================================"
     echo "🛑 Shutting down live demo and cleaning process group..."
-    pkill -9 -f "gz sim|gz-sim|ros2 launch|nav2_|bt_navigator|controller_server|planner_server|mission_manager|defect_detector|pose_projector" 2>/dev/null || true
+    pkill -9 -x rviz2 2>/dev/null || true
+    pkill -9 -x bt_navigator 2>/dev/null || true
+    pkill -9 -x controller_server 2>/dev/null || true
+    pkill -9 -x planner_server 2>/dev/null || true
+    pkill -9 -x behavior_server 2>/dev/null || true
+    pkill -9 -x smoother_server 2>/dev/null || true
+    pkill -9 -f "gz sim" 2>/dev/null || true
+    pkill -9 -f "rover_perception" 2>/dev/null || true
+    pkill -9 -f "rover_mission" 2>/dev/null || true
+    pkill -9 -f "ros2 launch rover_bringup" 2>/dev/null || true
     echo "✅ Shutdown complete."
 }
 trap cleanup EXIT INT TERM

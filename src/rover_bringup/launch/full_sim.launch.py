@@ -1,7 +1,7 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch.conditions import IfCondition, LaunchConfigurationEquals
@@ -83,7 +83,7 @@ def generate_launch_description():
 
     declare_use_rviz = DeclareLaunchArgument(
         'use_rviz',
-        default_value='true',
+        default_value='false',
         description='Launch RViz2 if true'
     )
 
@@ -94,17 +94,22 @@ def generate_launch_description():
         description='Full path to RViz config file'
     )
 
-    # 1. Gazebo Simulation + Rover + Bridge + Relay (RViz disabled here; launched by nav/slam)
-    sim_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(pkg_rover_gazebo, 'launch', 'sim.launch.py')
-        ),
-        launch_arguments={
-            'use_sim_time': use_sim_time,
-            'use_rviz': 'false',
-            'world': world,
-            'headless': headless
-        }.items()
+    # 1. Gazebo Simulation + Rover + Bridge + Relay (scoped to prevent use_rviz leakage)
+    sim_launch = GroupAction(
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(pkg_rover_gazebo, 'launch', 'sim.launch.py')
+                ),
+                launch_arguments={
+                    'use_sim_time': use_sim_time,
+                    'use_rviz': 'false',
+                    'world': world,
+                    'headless': headless
+                }.items()
+            )
+        ],
+        scoped=True
     )
 
     # 2. Perception Stack (Detector + Pose Projector + Defect Logger)
@@ -121,27 +126,37 @@ def generate_launch_description():
     )
 
     # 3. SLAM Mode (slam_toolbox)
-    slam_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(pkg_rover_navigation, 'launch', 'slam.launch.py')
-        ),
-        launch_arguments={
-            'use_sim_time': use_sim_time
-        }.items(),
+    slam_launch = GroupAction(
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(pkg_rover_navigation, 'launch', 'slam.launch.py')
+                ),
+                launch_arguments={
+                    'use_sim_time': use_sim_time
+                }.items()
+            )
+        ],
+        scoped=True,
         condition=LaunchConfigurationEquals('mode', 'slam')
     )
 
-    # 4. Nav2 Mode (AMCL + Costmaps + Planner + Controller + RViz)
-    nav_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(pkg_rover_navigation, 'launch', 'navigation.launch.py')
-        ),
-        launch_arguments={
-            'use_sim_time': use_sim_time,
-            'map': map_yaml_file,
-            'use_rviz': use_rviz,
-            'rviz_config': rviz_config
-        }.items(),
+    # 4. Nav2 Mode (AMCL + Costmaps + Planner + Controller, scoped to prevent use_rviz leakage)
+    nav_launch = GroupAction(
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(pkg_rover_navigation, 'launch', 'navigation.launch.py')
+                ),
+                launch_arguments={
+                    'use_sim_time': use_sim_time,
+                    'map': map_yaml_file,
+                    'use_rviz': 'false',  # Launched directly as node_rviz below
+                    'rviz_config': rviz_config
+                }.items()
+            )
+        ],
+        scoped=True,
         condition=LaunchConfigurationEquals('mode', 'nav')
     )
 
@@ -160,6 +175,17 @@ def generate_launch_description():
         condition=IfCondition(run_mission)
     )
 
+    # 6. RViz2 Visual Dashboard Node
+    node_rviz = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', rviz_config],
+        parameters=[{'use_sim_time': use_sim_time}],
+        output='screen',
+        condition=IfCondition(use_rviz)
+    )
+
     return LaunchDescription([
         declare_use_sim_time,
         declare_mode,
@@ -172,6 +198,7 @@ def generate_launch_description():
         declare_headless,
         declare_use_rviz,
         declare_rviz_config,
+        node_rviz,
         sim_launch,
         perception_launch,
         slam_launch,

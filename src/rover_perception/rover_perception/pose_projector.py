@@ -33,6 +33,7 @@ class PoseProjector(Node):
         self.latest_scan = None
         self.latest_map = None
         self.rejected_count = 0
+        self.projected_count = 0
 
         # TF2 buffer and listener
         self.tf_buffer = tf2_ros.Buffer()
@@ -80,6 +81,17 @@ class PoseProjector(Node):
         )
 
         self.get_logger().info('PoseProjector initialized: Pixel -> camera_optical_frame -> map via TF2 with bounds validation')
+
+    def log_rejection(self, reason: str, defect_type: str = "", extra: str = ""):
+        self.rejected_count += 1
+        msg = f"Rejected observation #{self.rejected_count} ({reason})"
+        if defect_type:
+            msg += f": {defect_type}"
+        if extra:
+            msg += f" {extra}"
+        self.get_logger().debug(msg)
+        if self.rejected_count == 1 or self.rejected_count % 50 == 0:
+            self.get_logger().info(f"[Throttled Rejection #{self.rejected_count}] {reason} ({defect_type})")
 
     def cam_info_cb(self, msg: CameraInfo):
         self.camera_info = msg
@@ -221,11 +233,7 @@ class PoseProjector(Node):
             rclpy.time.Time(),
             timeout=rclpy.duration.Duration(seconds=0.05)
         ):
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (TF to {self.target_frame} unavailable): "
-                f"{msg.defect_type} at ({u},{v})"
-            )
+            self.log_rejection(f"TF to {self.target_frame} unavailable", msg.defect_type, f"at ({u},{v})")
             return
 
         try:
@@ -236,10 +244,7 @@ class PoseProjector(Node):
                 pt_ray, self.target_frame, timeout=rclpy.duration.Duration(seconds=0.1)
             )
         except Exception as e:
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (TF transform failed): {e}"
-            )
+            self.log_rejection("TF transform failed", msg.defect_type, str(e))
             return
 
         p_cam = np.array([tf_origin.point.x, tf_origin.point.y, tf_origin.point.z], dtype=float)
@@ -247,11 +252,7 @@ class PoseProjector(Node):
         ray_vec = p_ray_pt - p_cam
         norm_ray = np.linalg.norm(ray_vec)
         if norm_ray < 1e-6:
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (Degenerate ray vector): "
-                f"{msg.defect_type} at ({u},{v})"
-            )
+            self.log_rejection("Degenerate ray vector", msg.defect_type, f"at ({u},{v})")
             return
         r_ray = ray_vec / norm_ray
 
@@ -276,20 +277,12 @@ class PoseProjector(Node):
             obs_dist = t_hit
         else:
             if d_lidar is None:
-                self.rejected_count += 1
-                self.get_logger().info(
-                    f"Rejected observation #{self.rejected_count} (invalid LiDAR range for wall): "
-                    f"{msg.defect_type} at ({u},{v})"
-                )
+                self.log_rejection("invalid LiDAR range for wall", msg.defect_type, f"at ({u},{v})")
                 return
 
             r_xy = math.hypot(r_ray[0], r_ray[1])
             if r_xy < 1e-4:
-                self.rejected_count += 1
-                self.get_logger().info(
-                    f"Rejected observation #{self.rejected_count} (vertical camera ray): "
-                    f"{msg.defect_type} at ({u},{v})"
-                )
+                self.log_rejection("vertical camera ray", msg.defect_type, f"at ({u},{v})")
                 return
 
             t_wall = d_lidar / r_xy
@@ -298,35 +291,19 @@ class PoseProjector(Node):
 
         # 4. Enforce strict Z-bounds, observation distance, and map bounds
         if obs_dist < 0.20 or obs_dist > 3.85:
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (observation distance {obs_dist:.2f}m outside [0.20, 3.85]m): "
-                f"{msg.defect_type} at ({u},{v})"
-            )
+            self.log_rejection(f"observation distance {obs_dist:.2f}m outside [0.20, 3.85]m", msg.defect_type, f"at ({u},{v})")
             return
 
         if p_hit[2] < -0.05 or p_hit[2] > 1.20:
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (z={p_hit[2]:.2f} out of bounds [-0.05, 1.20]): "
-                f"{msg.defect_type} at ({u},{v})"
-            )
+            self.log_rejection(f"z={p_hit[2]:.2f} out of bounds [-0.05, 1.20]", msg.defect_type, f"at ({u},{v})")
             return
 
         if p_hit[0] < -5.15 or p_hit[0] > 5.15 or p_hit[1] < -4.15 or p_hit[1] > 4.15:
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (xy=({p_hit[0]:.2f}, {p_hit[1]:.2f}) outside [-5.15, 5.15] x [-4.15, 4.15]): "
-                f"{msg.defect_type} at ({u},{v})"
-            )
+            self.log_rejection(f"xy=({p_hit[0]:.2f}, {p_hit[1]:.2f}) outside [-5.15, 5.15] x [-4.15, 4.15]", msg.defect_type, f"at ({u},{v})")
             return
 
         if self.latest_map is None:
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (/map not yet received): "
-                f"{msg.defect_type} at ({u},{v})"
-            )
+            self.log_rejection("/map not yet received", msg.defect_type, f"at ({u},{v})")
             return
 
         info = self.latest_map.info
@@ -335,21 +312,13 @@ class PoseProjector(Node):
         row = int((p_hit[1] - info.origin.position.y) / res)
 
         if col < 0 or col >= info.width or row < 0 or row >= info.height:
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (outside map bounds): "
-                f"{msg.defect_type} at ({p_hit[0]:.2f}, {p_hit[1]:.2f}) [col={col}, row={row}]"
-            )
+            self.log_rejection("outside map bounds", msg.defect_type, f"at ({p_hit[0]:.2f}, {p_hit[1]:.2f}) [col={col}, row={row}]")
             return
 
         cell_idx = row * info.width + col
         grid_val = self.latest_map.data[cell_idx]
         if grid_val == -1:  # unknown space
-            self.rejected_count += 1
-            self.get_logger().info(
-                f"Rejected observation #{self.rejected_count} (in unknown space): "
-                f"{msg.defect_type} at ({p_hit[0]:.2f}, {p_hit[1]:.2f}) [val=-1]"
-            )
+            self.log_rejection("in unknown space", msg.defect_type, f"at ({p_hit[0]:.2f}, {p_hit[1]:.2f}) [val=-1]")
             return
 
         # Compute Task 1 observation quality factors & spatial fusion weight
@@ -381,10 +350,14 @@ class PoseProjector(Node):
         event.camera_position.z = float(p_cam[2])
 
         self.pub_defect_event.publish(event)
-        self.get_logger().info(
+        self.projected_count += 1
+        log_str = (
             f"Projected {msg.defect_type} ({u},{v}) [mode={'floor' if is_floor else 'wall'}, d={d:.2f}m, w={w_obs:.3f}, alpha={alpha_view:.2f}, q={q_det:.2f}] -> [{self.target_frame}] "
             f"({p_hit[0]:.2f}, {p_hit[1]:.2f}, {p_hit[2]:.2f})"
         )
+        self.get_logger().debug(log_str)
+        if self.projected_count == 1 or self.projected_count % 50 == 0:
+            self.get_logger().info(f"[Projection #{self.projected_count}] {log_str}")
 
 
 def main(args=None):
