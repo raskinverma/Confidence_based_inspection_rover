@@ -215,10 +215,10 @@ BASE_WORLD_HEADER = """<?xml version="1.0" ?>
       </link>
     </model>
 
-    <!-- Movable Box (Dynamic Obstacle test) -->
+    <!-- Movable Box (Dynamic Obstacle test - placed against corridor wall, clear of doorway) -->
     <model name="movable_box">
       <static>false</static>
-      <pose>0.0 -3.0 0.25 0 0 0</pose>
+      <pose>-0.8 -3.4 0.25 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>5.0</mass>
@@ -239,6 +239,30 @@ BASE_WORLD_FOOTER = """
 """
 
 
+def ensure_aruco_texture(marker_id: int, output_dir: str = None) -> str:
+    """
+    Generates a valid ArUco marker PNG with DICT_4X4_50 padded with a 25px white border.
+    Saves to models/materials/textures directory and returns the absolute path.
+    """
+    import cv2
+    if output_dir is None:
+        workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        output_dir = os.path.join(workspace_root, 'src', 'rover_gazebo', 'models', 'materials', 'textures')
+    os.makedirs(output_dir, exist_ok=True)
+    png_path = os.path.join(output_dir, f"aruco_marker_{marker_id}.png")
+
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    if hasattr(cv2.aruco, 'generateImageMarker'):
+        marker_img = cv2.aruco.generateImageMarker(aruco_dict, marker_id, 200)
+    else:
+        marker_img = cv2.aruco.drawMarker(aruco_dict, marker_id, 200)
+
+    # Pad with 25 px white border so contour detection succeeds against dark/colored walls
+    bordered = cv2.copyMakeBorder(marker_img, 25, 25, 25, 25, cv2.BORDER_CONSTANT, value=255)
+    cv2.imwrite(png_path, bordered)
+    return png_path
+
+
 def get_box_size_for_surface(surface: str, defect_type: str):
     """
     Computes an appropriate visual box size depending on the surface orientation.
@@ -246,16 +270,22 @@ def get_box_size_for_surface(surface: str, defect_type: str):
     if surface == "floor":
         if defect_type == "leak":
             return "0.35 0.35 0.015"
+        elif defect_type == "aruco":
+            return "0.22 0.22 0.01"
         return "0.25 0.25 0.015"
     elif "north" in surface or "south" in surface or "sub" in surface or "div" in surface:
         # Wall aligned with X-axis; surface normal points along Y
         if defect_type == "leak":
             return "0.30 0.04 0.25"
+        elif defect_type == "aruco":
+            return "0.22 0.01 0.22"
         return "0.25 0.04 0.25"
     else:
         # Wall aligned with Y-axis; surface normal points along X
         if defect_type == "leak":
             return "0.04 0.30 0.25"
+        elif defect_type == "aruco":
+            return "0.01 0.22 0.22"
         return "0.04 0.25 0.25"
 
 
@@ -298,20 +328,27 @@ def generate_defect_model_sdf(name: str, defect_type: str, pos, rpy, surface: st
     </model>"""
 
     elif defect_type == "aruco":
+        texture_path = ensure_aruco_texture(aruco_id)
         return f"""
     <!-- Defect: {name} (ArUco ID {aruco_id} on {surface}) -->
     <model name="{name}">
       <static>true</static>
       <pose>{p_str}</pose>
       <link name="link">
-        <visual name="border">
-          <geometry><box><size>0.02 0.22 0.22</size></box></geometry>
-          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
-        </visual>
-        <visual name="marker_pattern">
-          <pose>0.012 0 0 0 0 0</pose>
-          <geometry><box><size>0.005 0.16 0.16</size></box></geometry>
-          <material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse></material>
+        <visual name="v">
+          <geometry><box><size>{box_size}</size></box></geometry>
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr>
+              <metal>
+                <albedo_map>{texture_path}</albedo_map>
+                <roughness>0.4</roughness>
+                <metalness>0.0</metalness>
+              </metal>
+            </pbr>
+          </material>
         </visual>
       </link>
     </model>"""

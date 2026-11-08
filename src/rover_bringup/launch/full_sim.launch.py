@@ -22,11 +22,19 @@ def generate_launch_description():
     world = LaunchConfiguration('world')
     headless = LaunchConfiguration('headless')
     use_rviz = LaunchConfiguration('use_rviz')
+    rviz_config = LaunchConfiguration('rviz_config')
+    inspection_mode = LaunchConfiguration('inspection_mode')
 
     declare_use_sim_time = DeclareLaunchArgument(
         'use_sim_time',
         default_value='true',
         description='Use simulation clock'
+    )
+
+    declare_inspection_mode = DeclareLaunchArgument(
+        'inspection_mode',
+        default_value='baseline',
+        description="Inspection mode: 'baseline' (fixed 7-waypoint sweep) or 'active' (NBV + coverage map)"
     )
 
     declare_mode = DeclareLaunchArgument(
@@ -79,6 +87,13 @@ def generate_launch_description():
         description='Launch RViz2 if true'
     )
 
+    default_rviz = os.path.join(pkg_rover_navigation, 'rviz', 'active_inspection_demo.rviz')
+    declare_rviz_config = DeclareLaunchArgument(
+        'rviz_config',
+        default_value=default_rviz,
+        description='Full path to RViz config file'
+    )
+
     # 1. Gazebo Simulation + Rover + Bridge + Relay (RViz disabled here; launched by nav/slam)
     sim_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -99,7 +114,8 @@ def generate_launch_description():
         ),
         launch_arguments={
             'use_sim_time': use_sim_time,
-            'output_dir': output_dir
+            'output_dir': output_dir,
+            'inspection_mode': inspection_mode
         }.items(),
         condition=IfCondition(run_perception)
     )
@@ -123,7 +139,8 @@ def generate_launch_description():
         launch_arguments={
             'use_sim_time': use_sim_time,
             'map': map_yaml_file,
-            'use_rviz': use_rviz
+            'use_rviz': use_rviz,
+            'rviz_config': rviz_config
         }.items(),
         condition=LaunchConfigurationEquals('mode', 'nav')
     )
@@ -134,7 +151,12 @@ def generate_launch_description():
         executable='mission_manager',
         name='mission_manager',
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}],
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'output_dir': output_dir,
+            'world_name': world,
+            'inspection_mode': inspection_mode,
+        }],
         condition=IfCondition(run_mission)
     )
 
@@ -143,11 +165,13 @@ def generate_launch_description():
         declare_mode,
         declare_run_perception,
         declare_run_mission,
+        declare_inspection_mode,
         declare_map,
         declare_output_dir,
         declare_world,
         declare_headless,
         declare_use_rviz,
+        declare_rviz_config,
         sim_launch,
         perception_launch,
         slam_launch,

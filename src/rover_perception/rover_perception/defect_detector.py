@@ -31,13 +31,13 @@ class DefectDetector(Node):
         self.camera_info = None
 
         # Declare ROS parameters for thresholds with baseline defaults
-        self.declare_parameter('min_contour_area', 500)
-        self.declare_parameter('rust.lower_hsv_1', [0, 100, 70])
+        self.declare_parameter('min_contour_area', 250)
+        self.declare_parameter('rust.lower_hsv_1', [0, 80, 60])
         self.declare_parameter('rust.upper_hsv_1', [10, 255, 255])
-        self.declare_parameter('rust.lower_hsv_2', [170, 100, 70])
+        self.declare_parameter('rust.lower_hsv_2', [170, 80, 60])
         self.declare_parameter('rust.upper_hsv_2', [180, 255, 255])
-        self.declare_parameter('leak.lower_hsv', [20, 100, 100])
-        self.declare_parameter('leak.upper_hsv', [35, 255, 255])
+        self.declare_parameter('leak.lower_hsv', [22, 90, 80])
+        self.declare_parameter('leak.upper_hsv', [36, 255, 255])
         self.declare_parameter('aruco.dictionary', 'DICT_4X4_50')
         self.declare_parameter('aruco.default_confidence', 0.95)
 
@@ -74,10 +74,15 @@ class DefectDetector(Node):
             10
         )
 
-        # Debug image publisher
+        # Debug and annotated inspection image publishers
         self.pub_debug_img = self.create_publisher(
             Image,
             '/camera/detections_debug',
+            10
+        )
+        self.pub_annotated_img = self.create_publisher(
+            Image,
+            '/inspection/annotated_image',
             10
         )
 
@@ -129,17 +134,23 @@ class DefectDetector(Node):
                 marker_id = int(ids[i][0])
                 defect_type = f"aruco_{marker_id}"
 
-                cv2.polylines(debug_image, [c.astype(np.int32)], True, (255, 0, 0), 2)
-                cv2.circle(debug_image, (u, v), 4, (255, 0, 0), -1)
-                cv2.putText(debug_image, defect_type, (u - 20, v - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                cv2.polylines(debug_image, [c.astype(np.int32)], True, (255, 120, 0), 2)
+                cv2.circle(debug_image, (u, v), 4, (255, 120, 0), -1)
+                
+                label = f"{defect_type} ({aruco_conf:.2f})"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                cv2.rectangle(debug_image, (max(0, u - 20), max(0, v - th - 10)),
+                              (max(0, u - 20) + tw + 6, max(th + 4, v - 2)), (20, 20, 20), -1)
+                cv2.putText(debug_image, label, (max(0, u - 17), max(th + 2, v - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 150, 0), 1, cv2.LINE_AA)
 
                 self.publish_defect(defect_type, aruco_conf, u, v, msg.header)
 
-        # Publish debug image
+        # Publish debug and live annotated images
         debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
         debug_msg.header = msg.header
         self.pub_debug_img.publish(debug_msg)
+        self.pub_annotated_img.publish(debug_msg)
 
     def process_color_mask(self, mask, defect_type, color_bgr, header, debug_image):
         # Morphological opening and closing to clean noise
@@ -155,12 +166,25 @@ class DefectDetector(Node):
                 x, y, w, h = cv2.boundingRect(cnt)
                 u = int(x + w / 2)
                 v = int(y + h / 2)
-                confidence = min(1.0, area / 20000.0 + 0.5)
+                # Bounding-box and contour detector quality score in [0.40, 0.85]
+                hull = cv2.convexHull(cnt)
+                hull_area = cv2.contourArea(hull)
+                solidity = float(area / hull_area) if hull_area > 0 else 0.5
+                aspect_ratio = float(min(w, h)) / float(max(w, h)) if max(w, h) > 0 else 0.5
+                area_factor = min(1.0, area / 8000.0)
+
+                confidence = 0.40 + 0.20 * area_factor + 0.15 * solidity + 0.10 * aspect_ratio
+                confidence = float(max(0.40, min(0.85, confidence)))
 
                 cv2.rectangle(debug_image, (x, y), (x + w, y + h), color_bgr, 2)
                 cv2.circle(debug_image, (u, v), 4, color_bgr, -1)
-                cv2.putText(debug_image, f"{defect_type} ({confidence:.2f})", (x, y - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_bgr, 2)
+                
+                label = f"{defect_type} ({confidence:.2f})"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                cv2.rectangle(debug_image, (x, max(0, y - th - 8)),
+                              (x + tw + 6, max(th + 4, y)), (20, 20, 20), -1)
+                cv2.putText(debug_image, label, (x + 3, max(th + 1, y - 4)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, color_bgr, 1, cv2.LINE_AA)
 
                 self.publish_defect(defect_type, confidence, u, v, header)
 

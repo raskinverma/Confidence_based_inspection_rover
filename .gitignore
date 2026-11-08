@@ -21,6 +21,9 @@ __pycache__/
 inspection_defects.csv
 results/
 *.pgm.bak
+src/rover_gazebo/worlds/run_*.sdf
+src/rover_gazebo/worlds/run_*_ground_truth.yaml
+tests/fixtures/
 
 # colcon artifacts
 .cmake/

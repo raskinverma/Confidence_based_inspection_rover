@@ -16,3 +16,9 @@ geometry_msgs/Point map_position
 
 # Image crop file path (filled by defect_logger)
 string image_path
+
+# Observation quality & weighting (Phase 2)
+float32 weight
+float32 observation_distance
+float32 quality
+geometry_msgs/Point camera_position

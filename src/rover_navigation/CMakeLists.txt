@@ -3,7 +3,7 @@ project(rover_navigation)
 
 find_package(ament_cmake REQUIRED)
 
-install(DIRECTORY config maps launch
+install(DIRECTORY config maps launch rviz
   DESTINATION share/${PROJECT_NAME}
 )
 
